@@ -1,0 +1,10 @@
+name: fixture
+description: Static registry fixture for search-only tests
+languages:
+  - Rust
+categories:
+  - Formatter
+source:
+  id: pkg:generic/acme/fixture@1.0.0
+bin:
+  fixture: fixture
