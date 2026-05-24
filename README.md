@@ -165,6 +165,66 @@ $ mason4agents env --shell bash
 export PATH='/home/user/.local/share/mason4agents/bin':"$PATH"
 ```
 
+## Building the Plugin
+
+The plugin has two components: the **Rust CLI** (core) and the **Pi extension** (TypeScript).
+
+### Build everything (recommended)
+
+```bash
+bun run build
+```
+
+This runs:
+1. `bun build` to bundle the TypeScript npm shim (`dist/bin/mason4agents.js`)
+2. `bun build` to bundle the Pi extension (`dist/pi/extension.js`)
+3. `cargo build --release` to compile the Rust CLI
+4. Copies the release binary to `native/mason4agents-{platform}-{arch}`
+
+### Build components separately
+
+```bash
+# Rust CLI only
+cargo build --release                          # binary: target/release/mason4agents
+cargo build                                    # debug binary: target/debug/mason4agents
+
+# Pi extension only (TypeScript bundle)
+./node_modules/.bin/tsc --noEmit               # typecheck
+bun build src/pi/extension.ts --outdir dist/pi --target bun
+```
+
+### Output artifacts
+
+| Artifact | Path | Used by |
+|---|---|---|
+| Rust CLI | `target/release/mason4agents` | Direct shell usage |
+| Rust CLI (dev) | `target/debug/mason4agents` | Pi extension dev fallback |
+| Native binary | `native/mason4agents-{platform}-{arch}` | Bundled Pi extension lookup |
+| npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
+| Pi extension | `dist/pi/extension.js` | `pi --offline -e dist/pi/extension.js` |
+
+## Tests
+
+### Rust
+
+```bash
+cargo test                         # 42 tests (40 unit + 2 integration)
+cargo test cli_fixture             # CLI integration tests only
+cargo test -- --ignored            # including network smoke test
+```
+
+### TypeScript
+
+```bash
+bun test                           # 14 tests
+```
+
+### Full verification
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && ./node_modules/.bin/tsc --noEmit && bun test
+```
+
 ## XDG Directory Layout
 
 ```text

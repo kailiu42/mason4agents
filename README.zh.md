@@ -36,7 +36,7 @@ v1 支持 **Pi CLI**（v0.75.5+）。后续版本可能增加 Claude Code、Code
 
 ## 安装
 
-### 从源码构建
+### 从源码安装
 
 ```bash
 git clone <repo-url>
@@ -163,6 +163,66 @@ $ mason4agents install stylua
 
 $ mason4agents env --shell bash
 export PATH='/home/user/.local/share/mason4agents/bin':"$PATH"
+```
+
+## 构建 Plugin
+
+插件包含两个组件：**Rust CLI**（核心）和 **Pi 扩展**（TypeScript）。
+
+### 一键构建（推荐）
+
+```bash
+bun run build
+```
+
+此命令依次执行：
+1. `bun build` 打包 TypeScript npm shim（`dist/bin/mason4agents.js`）
+2. `bun build` 打包 Pi 扩展（`dist/pi/extension.js`）
+3. `cargo build --release` 编译 Rust CLI
+4. 将 release 二进制复制到 `native/mason4agents-{platform}-{arch}`
+
+### 单独构建各组件
+
+```bash
+# 仅 Rust CLI
+cargo build --release                          # 二进制: target/release/mason4agents
+cargo build                                    # 调试二进制: target/debug/mason4agents
+
+# 仅 Pi 扩展（TypeScript 打包）
+./node_modules/.bin/tsc --noEmit               # 类型检查
+bun build src/pi/extension.ts --outdir dist/pi --target bun
+```
+
+### 构建产物
+
+| 产物 | 路径 | 用途 |
+|---|---|---|
+| Rust CLI | `target/release/mason4agents` | 直接命令行使用 |
+| Rust CLI (开发) | `target/debug/mason4agents` | Pi 扩展开发回退 |
+| 原生二进制 | `native/mason4agents-{platform}-{arch}` | Pi 扩展内置查找 |
+| npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
+| Pi 扩展 | `dist/pi/extension.js` | `pi --offline -e dist/pi/extension.js` |
+
+## 测试
+
+### Rust
+
+```bash
+cargo test                         # 42 个测试（40 单元 + 2 集成）
+cargo test cli_fixture             # 仅 CLI 集成测试
+cargo test -- --ignored            # 包含网络 smoke 测试
+```
+
+### TypeScript
+
+```bash
+bun test                           # 14 个测试
+```
+
+### 完整验证
+
+```bash
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && ./node_modules/.bin/tsc --noEmit && bun test
 ```
 
 ## XDG 目录布局
