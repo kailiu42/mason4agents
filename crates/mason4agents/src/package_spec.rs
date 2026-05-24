@@ -1,0 +1,758 @@
+use crate::expressions::render_template;
+use crate::platform::Platform;
+use crate::purl::Purl;
+use crate::types::{msg, M4aError, Result};
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawPackageSpec {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub licenses: Vec<String>,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(deserialize_with = "deserialize_deprecated", default)]
+    pub deprecated: bool,
+    pub source: RawSource,
+    #[serde(default)]
+    pub bin: BTreeMap<String, String>,
+    #[serde(default)]
+    pub share: BTreeMap<String, String>,
+    #[serde(default)]
+    pub opt: BTreeMap<String, String>,
+    #[serde(default)]
+    pub neovim: Option<RawNeovim>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawSource {
+    pub id: String,
+    #[serde(default)]
+    pub asset: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub version_overrides: Vec<RawVersionOverride>,
+    #[serde(default)]
+    pub extra_packages: Vec<String>,
+    #[serde(default)]
+    pub build: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub download: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub supported_platforms: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawVersionOverride {
+    pub constraint: String,
+    pub id: String,
+    #[serde(default)]
+    pub asset: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub extra_packages: Option<Vec<String>>,
+    #[serde(default)]
+    pub build: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub download: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawNeovim {
+    #[serde(default)]
+    pub lspconfig: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NormalizedPackage {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub languages: Vec<String>,
+    pub categories: Vec<String>,
+    pub deprecated: bool,
+    pub source: NormalizedSource,
+    pub bins: BTreeMap<String, String>,
+    pub share: BTreeMap<String, String>,
+    pub opt: BTreeMap<String, String>,
+    pub neovim_lspconfig: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NormalizedSource {
+    pub id: String,
+    pub source_type: String,
+    pub namespace: Option<String>,
+    pub package: String,
+    pub version: String,
+    pub asset: Option<AssetSpec>,
+    pub extra_packages: Vec<String>,
+    pub build_scripts: Vec<String>,
+    pub qualifiers: BTreeMap<String, String>,
+    pub subpath: Option<String>,
+    pub build: Option<Value>,
+    pub download: Option<DownloadEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AssetSpec {
+    pub target: Option<String>,
+    pub file: Option<String>,
+    #[serde(default)]
+    pub extra_files: Vec<String>,
+    pub bin: Option<String>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DownloadEntry {
+    pub target: Option<String>,
+    pub file: String,
+}
+
+impl RawPackageSpec {
+    pub fn normalize(
+        &self,
+        platform: &Platform,
+        requested_version: Option<&str>,
+    ) -> Result<NormalizedPackage> {
+        let selected_source = self.select_source(requested_version)?;
+        let mut purl = Purl::parse(&selected_source.id)?;
+        if let Some(version) = requested_version {
+            purl.version = Some(version.to_owned());
+        }
+        let version = purl.version.clone().ok_or_else(|| {
+            msg(format!(
+                "source id for {} must include a version",
+                self.name
+            ))
+        })?;
+        let source_id = rebuild_id_with_version(&selected_source.id, &version);
+        let asset = select_asset(
+            &self.name,
+            &selected_source.asset,
+            platform,
+            &version,
+            &source_id,
+        )?;
+        // Check supported_platforms if present
+        if let Some(ref supported) = selected_source.supported_platforms {
+            let candidates = platform.candidates();
+            if !candidates.iter().any(|c| supported.contains(c)) {
+                return Err(M4aError::UnsupportedTarget {
+                    package: self.name.clone(),
+                    targets: supported.clone(),
+                });
+            }
+        }
+        let download = selected_source
+            .download
+            .as_ref()
+            .and_then(|raw| select_download_entry(raw, platform).ok())
+            .flatten();
+        let build_scripts = extract_build_scripts(&selected_source.build, platform);
+        // Build initial context (without source.build) to render the build spec itself.
+        let initial_context = context_for(&version, &source_id, asset.as_ref(), None);
+        let rendered_build = selected_source
+            .build
+            .as_ref()
+            .map(|raw| {
+                render_value_deep(
+                    &serde_json::to_value(raw).unwrap_or(Value::Null),
+                    &initial_context,
+                )
+            })
+            .transpose()?;
+        // Now build the full context including the rendered build.
+        let context = context_for(
+            &version,
+            &source_id,
+            asset.as_ref(),
+            rendered_build.as_ref(),
+        );
+        let bins = render_map(&self.bin, &context)?;
+        let share = render_map(&self.share, &context)?;
+        let opt = render_map(&self.opt, &context)?;
+        Ok(NormalizedPackage {
+            name: self.name.clone(),
+            version: version.clone(),
+            description: self.description.clone(),
+            languages: self.languages.clone(),
+            categories: self.categories.clone(),
+            deprecated: self.deprecated,
+            source: NormalizedSource {
+                id: source_id,
+                source_type: purl.ty,
+                namespace: purl.namespace,
+                package: purl.name,
+                version,
+                asset,
+                extra_packages: selected_source.extra_packages.clone(),
+                build_scripts,
+                qualifiers: purl.qualifiers,
+                subpath: purl.subpath,
+                build: rendered_build,
+                download,
+            },
+            bins,
+            share,
+            opt,
+            neovim_lspconfig: self.neovim.as_ref().and_then(|n| n.lspconfig.clone()),
+        })
+    }
+
+    fn select_source(&self, requested_version: Option<&str>) -> Result<RawSource> {
+        let Some(requested) = requested_version else {
+            return Ok(self.source.clone());
+        };
+        let best = self
+            .source
+            .version_overrides
+            .iter()
+            .filter(|ov| constraint_matches(&ov.constraint, requested).unwrap_or(false))
+            .min_by_key(|ov| constraint_upper_bound(&ov.constraint));
+        if let Some(ov) = best {
+            let mut selected = self.source.clone();
+            selected.id = ov.id.clone();
+            if ov.asset.is_some() {
+                selected.asset = ov.asset.clone();
+            }
+            if let Some(ref extra) = ov.extra_packages {
+                selected.extra_packages = extra.clone();
+            }
+            if ov.build.is_some() {
+                selected.build = ov.build.clone();
+            }
+            if ov.download.is_some() {
+                selected.download = ov.download.clone();
+            }
+            return Ok(selected);
+        }
+        Ok(self.source.clone())
+    }
+}
+
+fn rebuild_id_with_version(id: &str, version: &str) -> String {
+    // Strip qualifiers (?...) and subpath (#...) before replacing version,
+    // then re-append them so they are preserved.
+    let (without_subpath, subpath) = match id.split_once('#') {
+        Some((base, sub)) => (base, Some(format!("#{sub}"))),
+        None => (id, None),
+    };
+    let (without_qualifiers, qualifiers) = match without_subpath.split_once('?') {
+        Some((base, qual)) => (base, Some(format!("?{qual}"))),
+        None => (without_subpath, None),
+    };
+    let base = match without_qualifiers.rfind('@') {
+        Some(0) | None => format!("{without_qualifiers}@{version}"),
+        Some(index) => format!("{}@{version}", &without_qualifiers[..index]),
+    };
+    let mut result = base;
+    if let Some(q) = qualifiers {
+        result.push_str(&q);
+    }
+    if let Some(s) = subpath {
+        result.push_str(&s);
+    }
+    result
+}
+
+fn render_map(raw: &BTreeMap<String, String>, context: &Value) -> Result<BTreeMap<String, String>> {
+    raw.iter()
+        .map(|(key, value)| Ok((key.clone(), render_template(value, context)?)))
+        .collect()
+}
+
+fn extract_build_scripts(build: &Option<serde_yaml::Value>, platform: &Platform) -> Vec<String> {
+    let Some(value) = build.as_ref() else {
+        return Vec::new();
+    };
+    let run = match value {
+        serde_yaml::Value::Mapping(map) => map
+            .get(serde_yaml::Value::String("run".to_owned()))
+            .unwrap_or(value),
+        other => other,
+    };
+    // If run is a sequence of platform-targeted entries, select the matching one.
+    if let serde_yaml::Value::Sequence(seq) = run {
+        let has_targets = seq.iter().any(|v| {
+            v.as_mapping()
+                .and_then(|m| m.get(serde_yaml::Value::String("target".to_owned())))
+                .is_some()
+        });
+        if has_targets {
+            let candidates = platform.candidates();
+            // First try to find a matching target entry.
+            for item in seq {
+                if let Some(mapping) = item.as_mapping() {
+                    let target_key = serde_yaml::Value::String("target".to_owned());
+                    let raw_target = mapping.get(&target_key);
+                    let target_strs: Vec<&str> = match raw_target {
+                        Some(serde_yaml::Value::String(s)) => vec![s.as_str()],
+                        Some(serde_yaml::Value::Sequence(arr)) => {
+                            arr.iter().filter_map(|v| v.as_str()).collect()
+                        }
+                        _ => Vec::new(),
+                    };
+                    if target_strs.is_empty() {
+                        continue;
+                    }
+                    if target_strs
+                        .iter()
+                        .any(|t| candidates.contains(&t.to_string()))
+                    {
+                        if let Some(run_val) =
+                            mapping.get(serde_yaml::Value::String("run".to_owned()))
+                        {
+                            return extract_run_strings(run_val);
+                        }
+                    }
+                }
+            }
+            // Fallback: first entry without a target field.
+            for item in seq {
+                if let Some(mapping) = item.as_mapping() {
+                    let target_key = serde_yaml::Value::String("target".to_owned());
+                    if !mapping.contains_key(&target_key) {
+                        if let Some(run_val) =
+                            mapping.get(serde_yaml::Value::String("run".to_owned()))
+                        {
+                            return extract_run_strings(run_val);
+                        }
+                    }
+                }
+            }
+        }
+        // Plain sequence of strings.
+        return seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+    }
+    if let serde_yaml::Value::String(s) = run {
+        return vec![s.clone()];
+    }
+    Vec::new()
+}
+
+fn extract_run_strings(run: &serde_yaml::Value) -> Vec<String> {
+    match run {
+        serde_yaml::Value::String(s) => vec![s.clone()],
+        serde_yaml::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+fn deserialize_deprecated<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<bool, D::Error> {
+    use serde::de;
+    struct DeprecatedVisitor;
+    impl<'de> de::Visitor<'de> for DeprecatedVisitor {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("bool or object")
+        }
+        fn visit_bool<E: de::Error>(self, v: bool) -> std::result::Result<bool, E> {
+            Ok(v)
+        }
+        fn visit_map<A: de::MapAccess<'de>>(self, _: A) -> std::result::Result<bool, A::Error> {
+            Ok(true)
+        }
+    }
+    d.deserialize_any(DeprecatedVisitor)
+}
+
+fn select_asset(
+    package: &str,
+    raw: &Option<serde_yaml::Value>,
+    platform: &Platform,
+    version: &str,
+    source_id: &str,
+) -> Result<Option<AssetSpec>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let json_value = serde_json::to_value(raw)?;
+    let selected = match json_value {
+        Value::Array(items) => {
+            let candidates = platform.candidates();
+            let mut matched_item = None;
+            let mut available = Vec::new();
+            for item in &items {
+                let target_val = item.get("target");
+                let item_targets: Vec<&str> = match target_val {
+                    Some(Value::String(s)) => {
+                        available.push(s.clone());
+                        vec![s.as_str()]
+                    }
+                    Some(Value::Array(arr)) => {
+                        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                        available.extend(strs.iter().map(|s| s.to_string()));
+                        strs
+                    }
+                    _ => continue,
+                };
+                if item_targets
+                    .iter()
+                    .any(|t| candidates.contains(&t.to_string()))
+                {
+                    matched_item = Some(item.clone());
+                    break;
+                }
+            }
+            match matched_item {
+                Some(item) => item,
+                None => {
+                    return Err(M4aError::UnsupportedTarget {
+                        package: package.to_owned(),
+                        targets: available,
+                    });
+                }
+            }
+        }
+        Value::Object(_) => json_value,
+        Value::Null => return Ok(None),
+        _ => return Err(msg(format!("invalid source.asset for package {package}"))),
+    };
+    asset_from_json(selected, version, source_id).map(Some)
+}
+
+fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<AssetSpec> {
+    let Value::Object(map) = value else {
+        return Err(msg("asset must be an object"));
+    };
+    // Parse file: can be a string or an array of strings.
+    let (file, extra_files) = match map.get("file") {
+        Some(Value::String(s)) => (Some(s.clone()), Vec::new()),
+        Some(Value::Array(arr)) => {
+            let files: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            let primary = files.first().cloned();
+            let rest: Vec<String> = files.into_iter().skip(1).collect();
+            (primary, rest)
+        }
+        _ => (None, Vec::new()),
+    };
+    let preliminary = AssetSpec {
+        target: map.get("target").and_then(Value::as_str).map(str::to_owned),
+        file,
+        extra_files,
+        bin: map.get("bin").and_then(Value::as_str).map(str::to_owned),
+        extra: map
+            .iter()
+            .filter(|(k, _)| *k != "target" && *k != "file" && *k != "bin")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+    let context = context_for(version, source_id, Some(&preliminary), None);
+    let mut rendered = preliminary.clone();
+    rendered.file = match rendered.file.as_deref() {
+        Some(s) => Some(render_template(s, &context)?),
+        None => None,
+    };
+    rendered.extra_files = rendered
+        .extra_files
+        .iter()
+        .map(|f| render_template(f, &context))
+        .collect::<Result<Vec<String>>>()?;
+    rendered.bin = match rendered.bin.as_deref() {
+        Some(s) => Some(render_template(s, &context)?),
+        None => None,
+    };
+    let context = context_for(version, source_id, Some(&rendered), None);
+    if let Some(file) = rendered.file.as_deref() {
+        rendered.file = Some(render_template(file, &context)?);
+    }
+    rendered.extra_files = rendered
+        .extra_files
+        .iter()
+        .map(|f| render_template(f, &context))
+        .collect::<Result<Vec<String>>>()?;
+    if let Some(bin) = rendered.bin.as_deref() {
+        rendered.bin = Some(render_template(bin, &context)?);
+    }
+    // Render template strings in extra fields recursively.
+    rendered.extra = rendered
+        .extra
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), render_value_deep(v, &context)?)))
+        .collect::<Result<BTreeMap<String, Value>>>()?;
+    Ok(rendered)
+}
+
+fn select_download_entry(
+    raw: &serde_yaml::Value,
+    platform: &Platform,
+) -> Result<Option<DownloadEntry>> {
+    // null → None
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let json_value = serde_json::to_value(raw)?;
+    // Resolve items: if object with "files" key, use that; if array, use directly
+    let items = match &json_value {
+        Value::Object(map) => map
+            .get("files")
+            .ok_or_else(|| msg("source.download object must have a 'files' key"))?,
+        Value::Array(_arr) => &json_value,
+        _ => return Err(msg("source.download must be an array, an object, or null")),
+    };
+    let items = match items {
+        Value::Array(arr) => arr.clone(),
+        _ => return Err(msg("source.download entries must be an array")),
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    // Single entry with no target: unconditional match
+    if items.len() == 1 && items[0].get("target").and_then(Value::as_str).is_none() {
+        let entry = &items[0];
+        let file = entry
+            .get("file")
+            .or_else(|| entry.get("url"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| msg("download entry missing 'file' or 'url' field"))?
+            .to_owned();
+        return Ok(Some(DownloadEntry { target: None, file }));
+    }
+    // Multiple entries: select by platform target
+    let mut targets = BTreeMap::new();
+    for item in &items {
+        let Some(target) = item.get("target").and_then(Value::as_str) else {
+            return Err(msg(
+                "download entry with multiple files must each have a 'target' field",
+            ));
+        };
+        targets.insert(target.to_owned(), item.clone());
+    }
+    let Some((matched_target, item)) = platform.select(&targets) else {
+        return Err(M4aError::UnsupportedTarget {
+            package: String::new(),
+            targets: targets.keys().cloned().collect(),
+        });
+    };
+    let file = item
+        .get("file")
+        .or_else(|| item.get("url"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| msg("download entry missing 'file' or 'url' field"))?
+        .to_owned();
+    Ok(Some(DownloadEntry {
+        target: Some(matched_target.to_owned()),
+        file,
+    }))
+}
+
+fn render_value_deep(value: &Value, context: &Value) -> Result<Value> {
+    match value {
+        Value::String(s) => {
+            if s.contains("{{") {
+                render_template(s, context).map(Value::String)
+            } else {
+                Ok(value.clone())
+            }
+        }
+        Value::Array(arr) => {
+            let rendered: Result<Vec<Value>> =
+                arr.iter().map(|v| render_value_deep(v, context)).collect();
+            rendered.map(Value::Array)
+        }
+        Value::Object(map) => {
+            let rendered: Result<Map<String, Value>> = map
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), render_value_deep(v, context)?)))
+                .collect();
+            rendered.map(Value::Object)
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+fn context_for(
+    version: &str,
+    source_id: &str,
+    asset: Option<&AssetSpec>,
+    build: Option<&Value>,
+) -> Value {
+    let asset_json = match asset {
+        Some(asset) => {
+            let mut obj = Map::new();
+            // Insert the explicit struct fields first.
+            if let Some(ref target) = asset.target {
+                obj.insert("target".to_owned(), json!(target));
+            }
+            if let Some(ref file) = asset.file {
+                obj.insert("file".to_owned(), json!(file));
+            }
+            if !asset.extra_files.is_empty() {
+                obj.insert("extra_files".to_owned(), json!(asset.extra_files));
+            }
+            if let Some(ref bin) = asset.bin {
+                obj.insert("bin".to_owned(), json!(bin));
+            }
+            // Promote extra fields to the top level (not nested under "extra").
+            for (k, v) in &asset.extra {
+                obj.insert(k.clone(), v.clone());
+            }
+            Value::Object(obj)
+        }
+        None => Value::Null,
+    };
+    let mut source_map = Map::new();
+    source_map.insert("id".to_owned(), json!(source_id));
+    source_map.insert("asset".to_owned(), asset_json);
+    if let Some(build) = build {
+        source_map.insert("build".to_owned(), build.clone());
+    }
+    json!({
+        "version": version,
+        "source": Value::Object(source_map),
+    })
+}
+
+fn constraint_matches(constraint: &str, version: &str) -> Result<bool> {
+    let Some(rest) = constraint.strip_prefix("semver:") else {
+        return Ok(false);
+    };
+    let rest = rest.trim();
+    if let Some(max) = rest.strip_prefix("<=") {
+        let requested = parse_semver(version)?;
+        let max = parse_semver(max.trim())?;
+        return Ok(requested <= max);
+    }
+    if let Some(exact) = rest.strip_prefix('=') {
+        return Ok(parse_semver(version)? == parse_semver(exact.trim())?);
+    }
+    // Bare semver version (e.g. "1.2.3") → exact match
+    if parse_semver(rest).is_ok() {
+        return Ok(parse_semver(version)? == parse_semver(rest)?);
+    }
+    Ok(false)
+}
+
+fn parse_semver(raw: &str) -> Result<Version> {
+    let trimmed = raw.trim().trim_start_matches('v');
+    Version::parse(trimmed).map_err(|err| msg(format!("invalid semver '{raw}': {err}")))
+}
+
+/// Returns the upper-bound version as a numeric value for comparison.
+/// Supports `semver:<=V`, `semver:=V`, and bare semver (e.g. `semver:1.2.3`).
+fn constraint_upper_bound(constraint: &str) -> Option<u64> {
+    let rest = constraint.strip_prefix("semver:")?.trim();
+    let version_str = rest
+        .strip_prefix("<=")
+        .or_else(|| rest.strip_prefix('='))
+        .unwrap_or(rest); // bare version → use as-is
+    let trimmed = version_str.trim().trim_start_matches('v');
+    let ver = Version::parse(trimmed).ok()?;
+    // Use major.minor.patch as a single comparable number
+    Some(ver.major * 1_000_000_000 + ver.minor * 1_000_000 + ver.patch * 1_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> RawPackageSpec {
+        serde_yaml::from_str(
+            r#"
+name: demo
+description: Demo package
+languages: [TypeScript]
+categories: [LSP]
+source:
+  id: pkg:github/acme/demo@v2.0.0
+  asset:
+    - target: linux_x64_gnu
+      file: demo-{{version}}-gnu.zip:bin/
+      bin: exec:demo
+    - target: linux_x64
+      file: demo-{{ version | strip_prefix "v" }}.zip
+      bin: demo
+  version_overrides:
+    - constraint: semver:<=v1.5.0
+      id: pkg:github/acme/demo@v1.5.0
+      asset:
+        - target: linux_x64_gnu
+          file: old-{{version}}.zip
+          bin: old-demo
+bin:
+  demo: "{{source.asset.bin}}"
+share:
+  demo-share: share
+opt:
+  demo-opt: opt
+neovim:
+  lspconfig: demo_ls
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn normalizes_platform_asset_and_expressions() {
+        let pkg = sample()
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(pkg.version, "v2.0.0");
+        assert_eq!(
+            pkg.source.asset.as_ref().unwrap().file.as_deref(),
+            Some("demo-v2.0.0-gnu.zip:bin/")
+        );
+        assert_eq!(pkg.bins.get("demo").unwrap(), "exec:demo");
+        assert_eq!(pkg.neovim_lspconfig.as_deref(), Some("demo_ls"));
+    }
+
+    #[test]
+    fn applies_version_override() {
+        let pkg = sample()
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), Some("v1.2.0"))
+            .unwrap();
+        assert_eq!(pkg.version, "v1.2.0");
+        assert!(pkg.source.id.ends_with("@v1.2.0"));
+        assert_eq!(
+            pkg.source.asset.as_ref().unwrap().file.as_deref(),
+            Some("old-v1.2.0.zip")
+        );
+    }
+
+    #[test]
+    fn reports_unsupported_targets() {
+        let err = sample()
+            .normalize(&Platform::new("win", "x64", None), None)
+            .unwrap_err();
+        assert!(matches!(err, M4aError::UnsupportedTarget { .. }));
+    }
+
+    #[test]
+    fn extracts_build_scripts() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: scripted
+source:
+  id: pkg:generic/acme/scripted@1.0.0
+  build:
+    run:
+      - echo build
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(pkg.source.build_scripts, vec!["echo build"]);
+    }
+}

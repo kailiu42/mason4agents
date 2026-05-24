@@ -1,0 +1,6 @@
+*.log
+.DS_Store
+dist/
+native/
+node_modules/
+target/

@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/mason4agents"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/mason4agents/mason4agents"
