@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { CliBridge } from "../../src/pi/cli";
 import { activate } from "../../src/pi/extension";
-import { createMasonPanel } from "../../src/pi/mason-panel";
+import { createMasonPanel, openMasonPanel } from "../../src/pi/mason-panel";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -38,6 +38,29 @@ describe("Mason panel", () => {
     expect(calls).toContainEqual(["update", "stylua"]);
     expect(calls).toContainEqual(["doctor"]);
   });
+
+  test("renders custom UI as line arrays with bounded width", async () => {
+    const { bridge: fake } = bridge();
+    let component: { render(width: number): unknown; handleInput(key: string): void } | undefined;
+    let closed = false;
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom(factory: Function) {
+          component = factory(undefined, undefined, undefined, () => { closed = true; });
+        },
+      },
+    };
+
+    await openMasonPanel(ctx, fake);
+    const lines = component?.render(20);
+
+    expect(Array.isArray(lines)).toBe(true);
+    expect((lines as string[]).join("\n")).toContain("stylua");
+    expect((lines as string[]).every((line) => line.length <= 20)).toBe(true);
+    component?.handleInput("q");
+    expect(closed).toBe(true);
+  });
 });
 
 describe("Pi extension", () => {
@@ -53,10 +76,19 @@ describe("Pi extension", () => {
     const commands: string[] = [];
     const tools: string[] = [];
     const events: string[] = [];
+    const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const messages: unknown[] = [];
     const ctx = {
-      commands: { registerCommand(name: string) { commands.push(name); } },
+      commands: {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+          commands.push(name);
+          handlers[name] = options.handler;
+        },
+      },
       tools: { registerTool(definition: { name: string }) { tools.push(definition.name); } },
-      events: { on(name: string) { events.push(name); } }
+      events: { on(name: string) { events.push(name); } },
+      sendMessage(message: unknown) { messages.push(message); },
+      sendUserMessage() { throw new Error("mason commands must not trigger agent turns"); }
     };
     try {
       const { bridge: fake } = bridge();
@@ -66,6 +98,9 @@ describe("Pi extension", () => {
       expect(tools).toContain("mason_install");
       expect(events).toEqual(["session_start"]);
       expect((process.env.PATH ?? "").startsWith(result.binDir)).toBe(true);
+      await handlers.mason?.("", { hasUI: false });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ customType: "mason4agents", display: true });
     } finally {
       process.env.HOME = oldHome;
       if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;

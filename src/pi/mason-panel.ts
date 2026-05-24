@@ -20,6 +20,7 @@ export interface MasonPanel {
   update(packages?: string[]): Promise<MasonPanelState>;
   doctor(): Promise<MasonPanelState>;
   render(): string;
+  renderLines(width: number): string[];
 }
 
 export function createMasonPanel(bridge: CliBridge): MasonPanel {
@@ -60,9 +61,10 @@ export function createMasonPanel(bridge: CliBridge): MasonPanel {
       return state;
     },
     render() {
-      const rows = state.packages.map(renderPackage).join("\n");
-      const header = `mason4agents — ${state.packages.length} package(s)`;
-      return rows.length > 0 ? `${header}\n${rows}` : header;
+      return renderPanelText(state);
+    },
+    renderLines(width: number) {
+      return renderPanelLines(state, width);
     }
   };
 }
@@ -70,21 +72,20 @@ export function createMasonPanel(bridge: CliBridge): MasonPanel {
 export async function openMasonPanel(ctx: unknown, bridge: CliBridge): Promise<MasonPanel> {
   const panel = createMasonPanel(bridge);
   await panel.search();
-  const anyCtx = ctx as { ui?: { custom?: (factory: Function) => unknown } };
-  if (typeof anyCtx.ui?.custom === "function") {
-    await anyCtx.ui.custom((_tui: unknown, _theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {
-      const component = {
-        dispose() {},
-        render() {},
-        handleInput(key: string) {
-          if (key === "q" || key === "\x1b") {
-            done(undefined);
-          }
-        },
-        invalidate() {},
-      };
-      return component;
-    });
+
+  const anyCtx = ctx as { hasUI?: boolean; ui?: { custom?: (factory: Function) => unknown } };
+  if (anyCtx.hasUI !== false && typeof anyCtx.ui?.custom === "function") {
+    await anyCtx.ui.custom((_tui: unknown, _theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => ({
+      render(width: number) {
+        return panel.renderLines(width);
+      },
+      handleInput(key: string) {
+        if (isCloseKey(key)) {
+          done(undefined);
+        }
+      },
+      invalidate() {},
+    }));
   }
   return panel;
 }
@@ -95,4 +96,35 @@ function renderPackage(value: unknown): string {
   const installed = pkg.installed === true ? "installed" : "available";
   const categories = Array.isArray(pkg.categories) ? pkg.categories.join(",") : "";
   return `${String(pkg.name ?? "<unknown>")} ${String(pkg.version ?? "")} [${installed}] ${categories}`.trim();
+}
+
+function renderPanelText(state: MasonPanelState): string {
+  const rows = state.packages.map(renderPackage).join("\n");
+  const header = `mason4agents — ${state.packages.length} package(s)`;
+  return rows.length > 0 ? `${header}\n${rows}` : header;
+}
+
+function renderPanelLines(state: MasonPanelState, width: number): string[] {
+  const safeWidth = Math.max(1, Math.floor(width));
+  const lines = [
+    truncateToWidth(`mason4agents — ${state.packages.length} package(s)`, safeWidth),
+    truncateToWidth("Press q or Esc to close", safeWidth),
+  ];
+  if (state.packages.length === 0) return lines;
+
+  lines.push("");
+  for (const pkg of state.packages) {
+    lines.push(truncateToWidth(renderPackage(pkg), safeWidth));
+  }
+  return lines;
+}
+
+function truncateToWidth(value: string, width: number): string {
+  if (value.length <= width) return value;
+  if (width <= 1) return value.slice(0, width);
+  return `${value.slice(0, width - 1)}…`;
+}
+
+function isCloseKey(key: string): boolean {
+  return key === "q" || key === "\x1b" || key === "escape" || key === "esc" || key === "enter" || key === "return" || key === "\r" || key === "\n";
 }
