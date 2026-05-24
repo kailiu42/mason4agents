@@ -1,0 +1,37 @@
+{
+  "name": "mason4agents",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "mason4agents": "dist/bin/mason4agents.js"
+  },
+  "keywords": [
+    "pi-package",
+    "mason",
+    "lsp",
+    "formatter",
+    "linter"
+  ],
+  "pi": {
+    "extensions": [
+      "dist/pi/extension.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "native",
+    "package.json"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/bin/mason4agents.ts --outdir dist/bin --target bun && bun build src/pi/extension.ts --outdir dist/pi --target bun && cargo build --release && mkdir -p native && exe=$(node -e 'console.log(process.platform === \"win32\" ? \".exe\" : \"\")') && src=$(echo target/release/mason4agents$exe) && dst=$(echo native/mason4agents-$(node -e 'console.log(process.platform + \"-\" + process.arch)')$exe) && cp \"$src\" \"$dst\"",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.49"
+  }
+}
