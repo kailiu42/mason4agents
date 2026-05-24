@@ -1,0 +1,9 @@
+pub mod build;
+pub mod cargo;
+pub mod generic;
+pub mod github;
+pub mod golang;
+pub mod manager;
+pub mod npm;
+pub mod openvsx;
+pub mod pypi;
