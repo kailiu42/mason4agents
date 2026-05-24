@@ -16,7 +16,69 @@ function bridge() {
   const fake: CliBridge = {
     async run(args: string[]) {
       calls.push(args);
-      if (args[0] === "search") return [{ name: "stylua", version: "v2.0.0", installed: false, categories: ["Formatter"] }];
+      if (args[0] === "search") {
+        return [
+          {
+            name: "stylua",
+            version: "v2.0.0",
+            installed: false,
+            installed_version: null,
+            outdated: false,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["Formatter"],
+            description: "Lua formatter",
+          },
+          {
+            name: "lua-language-server",
+            version: "v3.9.0",
+            installed: true,
+            installed_version: "v3.8.0",
+            outdated: true,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["LSP"],
+            description: "Lua LSP",
+          },
+        ];
+      }
+      if (args[0] === "list" && args.includes("--installed")) {
+        return [
+          {
+            name: "lua-language-server",
+            version: "v3.8.0",
+            source_id: "pkg:github/lua-language-server@v3.8.0",
+            bins: { "lua-language-server": "bin/lua-language-server" },
+            share: {},
+            opt: {},
+            installed_at: "2026-05-24T00:00:00Z",
+          },
+        ];
+      }
+      if (args[0] === "list") {
+        return [
+          {
+            name: "stylua",
+            version: "v2.0.0",
+            installed: false,
+            installed_version: null,
+            outdated: false,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["Formatter"],
+            description: "Lua formatter",
+          },
+        ];
+      }
+      if (args[0] === "doctor") {
+        return {
+          ok: true,
+          paths: { bin_dir: "/tmp/bin", bin_dir_exists: true, data_dir_writable: true },
+          registry: { cache_present: true, package_count: 2 },
+          path_env: { contains_bin_dir: true, bin_dir_first: true },
+          managers: [{ source_type: "npm", available: true }],
+        };
+      }
       return { args };
     }
   };
@@ -24,19 +86,50 @@ function bridge() {
 }
 
 describe("Mason panel", () => {
-  test("searches, renders, installs, uninstalls, updates, and doctors through bridge", async () => {
+  test("searches, renders tables, installs, uninstalls, updates, and doctors through bridge", async () => {
     const { bridge: fake, calls } = bridge();
     const panel = createMasonPanel(fake);
     await panel.search("lua", { category: "Formatter", language: "Lua" });
-    expect(panel.render()).toContain("stylua");
+    const rendered = panel.render();
+    expect(rendered).toContain("stylua");
+    expect(rendered).toContain("Status");
+    expect(rendered).toContain("language=Lua");
     await panel.install(["stylua"]);
     await panel.uninstall(["stylua"]);
     await panel.update(["stylua"]);
     await panel.doctor();
+    expect(calls).toContainEqual(["search", "lua", "--category", "Formatter", "--language", "Lua"]);
     expect(calls).toContainEqual(["install", "stylua"]);
     expect(calls).toContainEqual(["uninstall", "stylua"]);
     expect(calls).toContainEqual(["update", "stylua"]);
     expect(calls).toContainEqual(["doctor"]);
+  });
+
+  test("filters locally, edits language, and shows installed table state", async () => {
+    const { bridge: fake, calls } = bridge();
+    const panel = createMasonPanel(fake);
+    await panel.runCurrent();
+
+    await panel.handleInput("/");
+    await panel.handleInput("l");
+    await panel.handleInput("a");
+    await panel.handleInput("n");
+    await panel.handleInput("g");
+    await panel.handleInput("enter");
+    expect(panel.render()).toContain("lua-language-server");
+    expect(panel.render()).not.toContain("stylua");
+
+    await panel.handleInput("l");
+    await panel.handleInput("L");
+    await panel.handleInput("u");
+    await panel.handleInput("a");
+    await panel.handleInput("enter");
+    expect(calls).toContainEqual(["search", "--language", "Lua"]);
+
+    await panel.handleInput("tab");
+    await panel.handleInput("tab");
+    expect(panel.render()).toContain("Installed At");
+    expect(panel.render()).toContain("lua-language-server");
   });
 
   test("renders custom UI as line arrays with bounded width", async () => {
@@ -53,12 +146,17 @@ describe("Mason panel", () => {
     };
 
     await openMasonPanel(ctx, fake);
-    const lines = component?.render(20);
+    const lines = component?.render(24);
 
     expect(Array.isArray(lines)).toBe(true);
+    expect((lines as string[]).join("\n")).toContain("[search]");
     expect((lines as string[]).join("\n")).toContain("stylua");
-    expect((lines as string[]).every((line) => line.length <= 20)).toBe(true);
+    expect((lines as string[]).every((line) => line.length <= 24)).toBe(true);
+    component?.handleInput("/");
+    expect((component?.render(24) as string[]).join("\n")).toContain("filter>");
+    component?.handleInput("escape");
     component?.handleInput("q");
+    await Promise.resolve();
     expect(closed).toBe(true);
   });
 });
@@ -99,8 +197,14 @@ describe("Pi extension", () => {
       expect(events).toEqual(["session_start"]);
       expect((process.env.PATH ?? "").startsWith(result.binDir)).toBe(true);
       await handlers.mason?.("", { hasUI: false });
-      expect(messages).toHaveLength(1);
+      await handlers.mason?.("search stylua --language Lua", { hasUI: false });
+      await handlers["mason-doctor"]?.("", { hasUI: false });
+      expect(messages).toHaveLength(3);
       expect(messages[0]).toMatchObject({ customType: "mason4agents", display: true });
+      expect(messages[1]).toMatchObject({ customType: "mason4agents", display: true });
+      expect(String((messages[1] as { content?: unknown }).content)).toContain("stylua");
+      expect(String((messages[1] as { content?: unknown }).content)).not.toContain("{");
+      expect(messages[2]).toMatchObject({ customType: "mason4agents-doctor", display: true });
     } finally {
       process.env.HOME = oldHome;
       if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;

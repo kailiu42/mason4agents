@@ -10,7 +10,7 @@ v1 支持 **Pi CLI**（v0.75.5+）。后续版本可能增加 Claude Code、Code
 
 - **Mason Registry 兼容** — 使用与 mason.nvim 相同的 registry、包 schema 和 release assets
 - **不依赖 Neovim** — 独立 Rust CLI，无需 shell out 到 Neovim
-- **Pi 扩展** — `/mason` 包管理 UI、7 个 LLM 可调用工具、自动 PATH 注入
+- **Pi 扩展** — `/mason` 交互式包管理器、等价 CLI 的 slash 子命令、7 个 LLM 可调用工具、自动 PATH 注入
 - **XDG Base Directory** — data、config、cache、state 遵循 `$XDG_*` 规范
 - **默认安全** — 无 `--allow-build-scripts` 不执行构建脚本、zip-slip 防护、路径穿越拒绝、临时目录原子重命名
 - **JSON 协议** — 所有 CLI 命令支持 `--json` 机器可读输出
@@ -97,17 +97,27 @@ mason4agents uninstall stylua
 
 ### Pi 扩展
 
-在 Pi 中打开包管理 UI：
+在 Pi 中打开交互式包管理器：
 
 ```
 /mason
 ```
 
-运行诊断：
+Panel 顶部展示命令 tabs（`search`、`list`、`installed`、`install`、`uninstall`、`update`、`which`、`refresh`、`doctor`、`env`、`bin-dir`），下方是格式化输出区域。表格视图会直接显示 installed 状态，并支持 `/` 本地过滤、`↑`/`↓` 滚动、`e` 编辑当前命令输入，以及 `l` 编辑 `search --language` 过滤器。
 
-```
+不需要打开 panel 时，可直接运行等价 CLI 的 slash 子命令：
+
+```text
+/mason search stylua --language Lua
+/mason installed
+/mason list --outdated
+/mason install stylua
+/mason uninstall stylua
+/mason doctor
 /mason-doctor
 ```
+
+直接 slash 命令结果会渲染为人类可读的表格或摘要，不会输出原始 JSON。
 
 Pi 中可使用以下工具（底层调用 Rust CLI）：
 
@@ -216,7 +226,7 @@ cargo test -- --ignored            # 包含网络 smoke 测试
 ### TypeScript
 
 ```bash
-bun test                           # 14 个测试
+bun test                           # 19 个测试
 ```
 
 ### 完整验证

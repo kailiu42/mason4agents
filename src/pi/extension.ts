@@ -1,6 +1,8 @@
 import { createCliBridge } from "./cli";
 import type { CliBridge } from "./cli";
+import { executeMasonCommand } from "./mason-command";
 import { openMasonPanel } from "./mason-panel";
+import { modelSupportsFiltering, renderDisplay, renderDisplayText, type DisplayModel } from "./mason-render";
 import { registerPiTools } from "./pi-tools";
 import { ensureMasonBinOnPath } from "./path-env";
 
@@ -14,12 +16,23 @@ export async function activate(ctx: unknown, bridge: CliBridge = createCliBridge
   const pathInfo = ensureMasonBinOnPath();
   const apiCtx = ctx;
 
-  registerCommand(ctx, "mason", "Open mason4agents package manager", async (_args, commandCtx) => {
+  registerCommand(ctx, "mason", "Open mason4agents package manager", async (args, commandCtx) => {
     try {
+      const input = typeof args === "string" ? args.trim() : "";
       const shownInUi = canShowCustomUi(commandCtx);
-      const panel = await openMasonPanel(commandCtx, bridge);
-      if (!shownInUi) {
-        publishMessage(apiCtx, "mason4agents", panel.render());
+      if (input.length === 0) {
+        const panel = await openMasonPanel(commandCtx, bridge);
+        if (!shownInUi) {
+          publishMessage(apiCtx, "mason4agents", panel.render());
+        }
+        return;
+      }
+
+      const model = await executeMasonCommand(input, bridge);
+      if (shownInUi) {
+        await showDisplayPanel(commandCtx, model);
+      } else {
+        publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
       }
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason", err);
@@ -28,12 +41,11 @@ export async function activate(ctx: unknown, bridge: CliBridge = createCliBridge
 
   registerCommand(ctx, "mason-doctor", "Run mason4agents doctor", async (_args, commandCtx) => {
     try {
-      const result = await bridge.run(["doctor"]);
-      const text = JSON.stringify(result, null, 2);
+      const model = await executeMasonCommand("doctor", bridge);
       if (canShowCustomUi(commandCtx)) {
-        await showTextPanel(commandCtx, "mason4agents doctor", text);
+        await showDisplayPanel(commandCtx, model);
       } else {
-        publishMessage(apiCtx, "mason4agents-doctor", text);
+        publishMessage(apiCtx, "mason4agents-doctor", renderDisplayText(model));
       }
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason-doctor", err);
@@ -78,19 +90,39 @@ function canShowCustomUi(ctx: unknown): boolean {
   return anyCtx.hasUI !== false && typeof anyCtx.ui?.custom === "function";
 }
 
-async function showTextPanel(ctx: unknown, title: string, text: string): Promise<void> {
+async function showDisplayPanel(ctx: unknown, model: DisplayModel): Promise<void> {
   const anyCtx = ctx as { ui?: { custom?: (factory: Function) => unknown } };
-  await anyCtx.ui?.custom?.((_tui: unknown, _theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => ({
-    render(width: number) {
-      return renderTextLines(title, text, width);
-    },
-    handleInput(key: string) {
-      if (isCloseKey(key)) {
-        done(undefined);
-      }
-    },
-    invalidate() {},
-  }));
+  await anyCtx.ui?.custom?.((tui: unknown, _theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {
+    const state = { filter: "", filterDraft: "", editingFilter: false, scroll: 0 };
+    return {
+      render(width: number) {
+        return renderDisplayPanel(model, state, width);
+      },
+      handleInput(key: string) {
+        if (state.editingFilter) {
+          handleFilterInput(state, key);
+          requestTuiRender(tui);
+          return;
+        }
+        if (isCloseKey(key)) {
+          done(undefined);
+          return;
+        }
+        if (key === "/" && modelSupportsFiltering(model)) {
+          state.filterDraft = state.filter;
+          state.editingFilter = true;
+          requestTuiRender(tui);
+          return;
+        }
+        if (isScrollDownKey(key)) state.scroll += 1;
+        if (isScrollUpKey(key)) state.scroll = Math.max(0, state.scroll - 1);
+        if (isPageDownKey(key)) state.scroll += 10;
+        if (isPageUpKey(key)) state.scroll = Math.max(0, state.scroll - 10);
+        requestTuiRender(tui);
+      },
+      invalidate() {},
+    };
+  });
 }
 
 function publishMessage(ctx: unknown, customType: string, content: string): void {
@@ -112,13 +144,31 @@ function reportCommandError(commandCtx: unknown, apiCtx: unknown, command: strin
   }
 }
 
-function renderTextLines(title: string, text: string, width: number): string[] {
+function renderDisplayPanel(model: DisplayModel, state: { filter: string; filterDraft: string; editingFilter: boolean; scroll: number }, width: number): string[] {
   const safeWidth = Math.max(1, Math.floor(width));
-  const lines = [truncateToWidth(title, safeWidth), truncateToWidth("Press q or Esc to close", safeWidth), ""];
-  for (const line of text.split("\n")) {
-    lines.push(truncateToWidth(line, safeWidth));
+  const lines = renderDisplay(model, { width: safeWidth, filter: state.filter, scroll: state.scroll });
+  if (state.editingFilter) {
+    lines.splice(1, 0, truncateToWidth(`filter> ${state.filterDraft}`, safeWidth));
   }
-  return lines;
+  return lines.map((line) => truncateToWidth(line, safeWidth));
+}
+
+function handleFilterInput(state: { filter: string; filterDraft: string; editingFilter: boolean; scroll: number }, key: string): void {
+  if (key === "\r" || key === "\n" || key === "enter" || key === "return") {
+    state.filter = state.filterDraft.trim();
+    state.scroll = 0;
+    state.editingFilter = false;
+    return;
+  }
+  if (key === "\x1b" || key === "escape" || key === "esc") {
+    state.editingFilter = false;
+    return;
+  }
+  if (key === "\b" || key === "\x7f" || key === "backspace") {
+    state.filterDraft = state.filterDraft.slice(0, -1);
+    return;
+  }
+  if (key.length === 1 && key >= " ") state.filterDraft += key;
 }
 
 function truncateToWidth(value: string, width: number): string {
@@ -128,7 +178,33 @@ function truncateToWidth(value: string, width: number): string {
 }
 
 function isCloseKey(key: string): boolean {
-  return key === "q" || key === "\x1b" || key === "escape" || key === "esc" || key === "enter" || key === "return" || key === "\r" || key === "\n";
+  return key === "q" || key === "\x1b" || key === "escape" || key === "esc";
+}
+
+function isScrollDownKey(key: string): boolean {
+  return key === "down" || key === "j" || key === "\x1b[B";
+}
+
+function isScrollUpKey(key: string): boolean {
+  return key === "up" || key === "k" || key === "\x1b[A";
+}
+
+function isPageDownKey(key: string): boolean {
+  return key === "pagedown" || key === "\x1b[6~";
+}
+
+function isPageUpKey(key: string): boolean {
+  return key === "pageup" || key === "\x1b[5~";
+}
+
+function requestTuiRender(tui: unknown): void {
+  if (typeof tui !== "object" || tui === null) return;
+  const candidate = tui as { requestRender?: (force?: boolean) => unknown; invalidate?: () => unknown };
+  if (typeof candidate.requestRender === "function") {
+    candidate.requestRender(true);
+  } else if (typeof candidate.invalidate === "function") {
+    candidate.invalidate();
+  }
 }
 
 function registerSessionStart(ctx: unknown, handler: () => unknown): void {

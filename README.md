@@ -10,7 +10,7 @@ v1 supports **Pi CLI** (v0.75.5+). Future versions may add Claude Code, Codex CL
 
 - **Mason Registry compatible** — consumes the same registry, package schema, and release assets as mason.nvim
 - **No Neovim dependency** — standalone Rust CLI, no shelling out to Neovim
-- **Pi extension** — `/mason` package manager UI, 7 LLM-callable tools, automatic PATH injection
+- **Pi extension** — `/mason` interactive package manager, CLI-equivalent slash subcommands, 7 LLM-callable tools, automatic PATH injection
 - **XDG Base Directory** — data, config, cache, and state follow `$XDG_*` conventions
 - **Safe by default** — no build script execution without `--allow-build-scripts`, zip-slip protection, path traversal rejection, sandboxed temp directories with atomic rename
 - **JSON protocol** — all CLI commands support `--json` for machine-readable output
@@ -97,17 +97,27 @@ mason4agents uninstall stylua
 
 ### Pi Extension
 
-Open the package manager UI in Pi:
+Open the interactive package manager in Pi:
 
 ```
 /mason
 ```
 
-Run doctor:
+The panel shows command tabs at the top (`search`, `list`, `installed`, `install`, `uninstall`, `update`, `which`, `refresh`, `doctor`, `env`, `bin-dir`) and a formatted output area below. Table views show installed status directly and support `/` local filtering, `↑`/`↓` scrolling, `e` to edit the active command input, and `l` to edit the `search --language` filter.
 
-```
+Run CLI-equivalent slash subcommands directly when you do not need the panel:
+
+```text
+/mason search stylua --language Lua
+/mason installed
+/mason list --outdated
+/mason install stylua
+/mason uninstall stylua
+/mason doctor
 /mason-doctor
 ```
+
+Direct slash-command results are rendered as human-readable tables or summaries, not raw JSON.
 
 Use the following tools from Pi (they call the Rust CLI under the hood):
 
@@ -216,7 +226,7 @@ cargo test -- --ignored            # including network smoke test
 ### TypeScript
 
 ```bash
-bun test                           # 14 tests
+bun test                           # 19 tests
 ```
 
 ### Full verification
