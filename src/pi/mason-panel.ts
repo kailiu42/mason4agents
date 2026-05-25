@@ -18,26 +18,51 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
     ...options,
     notify: options.notify ?? ((message, level) => notifyFromContext(ctx, message, level)),
   });
-  await panel.runCurrent();
 
   const anyCtx = ctx as { hasUI?: boolean; ui?: { custom?: (factory: Function, options?: unknown) => unknown } };
   if (anyCtx.hasUI !== false && typeof anyCtx.ui?.custom === "function") {
-    await anyCtx.ui.custom((tui: unknown, theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => ({
-      width: "100%",
-      render(width: number) {
-        return panel.renderLines(width, styleFromPiTheme(theme));
-      },
-      handleInput(key: string) {
-        void panel.handleInput(key).then((result) => {
-          if (result === "close") {
-            done(undefined);
-          } else {
-            requestTuiRender(tui);
-          }
-        });
-      },
-      invalidate() {},
-    }), {
+    panel.state.loading = true;
+    panel.state.model = { kind: "summary", title: "mason list", lines: ["Loading..."] };
+    let activeTui: unknown;
+    let activeComponent: { invalidate?: () => unknown } | undefined;
+    let initialLoadStarted = false;
+    let closed = false;
+    const startInitialLoad = () => {
+      if (initialLoadStarted) return;
+      initialLoadStarted = true;
+      setTimeout(() => {
+        if (closed) return;
+        void panel.runCurrent().then(
+          () => requestPanelRender(activeTui, activeComponent),
+          () => requestPanelRender(activeTui, activeComponent),
+        );
+      }, 0);
+    };
+    await anyCtx.ui.custom((tui: unknown, theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {
+      activeTui = tui;
+      const component = {
+        width: "100%",
+        render(width: number) {
+          startInitialLoad();
+          return panel.renderLines(width, styleFromPiTheme(theme));
+        },
+        handleInput(key: string) {
+          void panel.handleInput(key).then((result) => {
+            if (result === "close") {
+              closed = true;
+              done(undefined);
+            } else {
+              requestPanelRender(tui, component);
+            }
+          });
+        },
+        invalidate() {
+          requestTuiRender(tui);
+        },
+      };
+      activeComponent = component;
+      return component;
+    }, {
       overlay: true,
       overlayOptions: {
         width: "100%",
@@ -46,6 +71,8 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
         margin: { top: 0, right: 0, bottom: 0, left: 0 },
       },
     });
+  } else {
+    await panel.runCurrent();
   }
   return panel;
 }
@@ -64,6 +91,15 @@ function masonPanelHost(bridge: CliBridge, options: MasonPanelOptions): MasonTui
 function notifyFromContext(ctx: unknown, message: string, level?: "info" | "error"): void {
   const anyCtx = ctx as { ui?: { notify?: (message: string, level?: string) => unknown } };
   if (typeof anyCtx.ui?.notify === "function") anyCtx.ui.notify(message, level);
+}
+
+function requestPanelRender(tui: unknown, component: { invalidate?: () => unknown } | undefined): void {
+  requestTuiRender(tui);
+  try {
+    component?.invalidate?.();
+  } catch {
+    // Re-render best effort only; command state has already been updated.
+  }
 }
 
 function requestTuiRender(tui: unknown): void {

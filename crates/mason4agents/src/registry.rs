@@ -341,6 +341,42 @@ bin:
     }
 
     #[test]
+    fn load_or_refresh_uses_cache_unless_source_is_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let registry = write_registry(tmp.path());
+        let source = registry.to_str().unwrap();
+        refresh_registry(&paths, Some(source)).unwrap();
+
+        fs::write(
+            registry.join("packages/demo/package.yaml"),
+            r#"
+name: demo
+description: Demo package
+languages: [Rust]
+categories: [Formatter]
+source:
+  id: pkg:generic/acme/demo@2.0.0
+bin:
+  demo: demo
+"#,
+        )
+        .unwrap();
+
+        let cached = load_or_refresh(&paths, None).unwrap();
+        assert_eq!(
+            cached.packages.get("demo").unwrap().source.id,
+            "pkg:generic/acme/demo@1.0.0"
+        );
+
+        let refreshed = load_or_refresh(&paths, Some(source)).unwrap();
+        assert_eq!(
+            refreshed.packages.get("demo").unwrap().source.id,
+            "pkg:generic/acme/demo@2.0.0"
+        );
+    }
+
+    #[test]
     fn loads_registry_zip_and_searches_filters() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("registry.zip");

@@ -68,6 +68,17 @@ function bridge() {
             categories: ["Formatter"],
             description: "Lua formatter",
           },
+          {
+            name: "lua-language-server",
+            version: "v3.9.0",
+            installed: true,
+            installed_version: "v3.8.0",
+            outdated: true,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["LSP"],
+            description: "Lua LSP",
+          },
         ];
       }
       if (args[0] === "doctor") {
@@ -101,6 +112,12 @@ function fakeTheme() {
 
 function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+async function waitForInitialPanelLoad(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe("Mason panel", () => {
@@ -139,6 +156,7 @@ describe("Mason panel", () => {
     expect(panel.render()).toContain("lua-language-server");
     expect(panel.render()).not.toContain("stylua");
 
+    await panel.handleInput("shift+tab");
     await panel.handleInput("l");
     await panel.handleInput("L");
     await panel.handleInput("u");
@@ -182,6 +200,8 @@ describe("Mason panel", () => {
     };
 
     await openMasonPanel(ctx, fake);
+    component?.render(24);
+    await waitForInitialPanelLoad();
     const lines = component?.render(24);
 
     expect(customOptions).toMatchObject({
@@ -189,7 +209,7 @@ describe("Mason panel", () => {
       overlayOptions: { width: "100%", maxHeight: "90%", anchor: "top-center" },
     });
     expect(Array.isArray(lines)).toBe(true);
-    expect((lines as string[]).join("\n")).toContain("[search]");
+    expect((lines as string[]).join("\n")).toContain("[list]");
     expect((lines as string[]).join("\n")).toContain("stylua");
     expect((lines as string[]).every((line) => stripAnsi(line).length <= 24)).toBe(true);
     component?.handleInput("/");
@@ -202,6 +222,52 @@ describe("Mason panel", () => {
     component?.handleInput("q");
     await Promise.resolve();
     expect(closed).toBe(true);
+  });
+
+  test("opens custom UI before initial list starts", async () => {
+    let resolveRun!: (value: unknown) => void;
+    const calls: string[][] = [];
+    const fake: CliBridge = {
+      run(args: string[]) {
+        calls.push(args);
+        return new Promise((resolve) => { resolveRun = resolve; });
+      },
+    };
+    let component: { render(width: number): unknown } | undefined;
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom(factory: Function) {
+          component = factory({ requestRender() {} }, fakeTheme(), undefined, () => {});
+        },
+      },
+    };
+
+    await openMasonPanel(ctx, fake);
+    expect(component).toBeDefined();
+    expect(calls).toEqual([]);
+    expect((component?.render(48) as string[]).join("\n")).toContain("Loading...");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual([["list"]]);
+    expect((component?.render(48) as string[]).join("\n")).toContain("Loading...");
+
+    resolveRun([
+      {
+        name: "stylua",
+        version: "v2.0.0",
+        installed: false,
+        installed_version: null,
+        outdated: false,
+        deprecated: false,
+        languages: ["Lua"],
+        categories: ["Formatter"],
+        description: "Lua formatter",
+      },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect((component?.render(48) as string[]).join("\n")).toContain("stylua");
   });
 });
 

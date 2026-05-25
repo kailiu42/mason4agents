@@ -4,8 +4,7 @@ use mason4agents::installer::Installer;
 use mason4agents::paths::MasonPaths;
 use mason4agents::platform::Platform;
 use mason4agents::registry::{
-    load_cached_registry, load_or_refresh, refresh_registry, search_packages, PackageSummary,
-    RefreshSummary,
+    load_or_refresh, refresh_registry, search_packages, PackageSummary, RefreshSummary,
 };
 use mason4agents::store::{InstalledPackage, InstalledState};
 use mason4agents::types::{error_json, success_json, M4aError, Result};
@@ -195,10 +194,7 @@ fn run(cli: Cli) -> Result<Output> {
                 let list = state.packages.values().cloned().collect::<Vec<_>>();
                 Ok(format_installed_list(&list))
             } else {
-                let cache = match registry {
-                    Some(source) => load_or_refresh(&paths, Some(&source))?,
-                    None => load_cached_registry(&paths)?,
-                };
+                let cache = load_or_refresh(&paths, registry.as_deref())?;
                 let mut list = search_packages(&cache, &state, &platform, None, None, None);
                 if outdated {
                     list.retain(|p| p.outdated);

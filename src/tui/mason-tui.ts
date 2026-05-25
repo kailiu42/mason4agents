@@ -106,8 +106,8 @@ const PANEL_DISPLAY_MIN_LINES = PANEL_MAX_ROWS + 4;
 
 export function createMasonTui(host: MasonTuiHost): MasonTui {
   const state: MasonTuiState = {
-    command: "search",
-    commandIndex: 0,
+    command: "list",
+    commandIndex: commandIndex("list"),
     view: "list",
     query: "",
     category: undefined,
@@ -119,7 +119,7 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
     selectedPackage: undefined,
     loading: false,
     edit: undefined,
-    model: modelForResult("packages", [], "mason search"),
+    model: modelForResult("packages", [], "mason list"),
     packages: [],
     tableItems: [],
     activeRows: [],

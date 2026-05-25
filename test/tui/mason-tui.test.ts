@@ -186,7 +186,7 @@ describe("Mason TUI core", () => {
     await tui.handleInput("enter");
     expect(tui.state.view).toBe("detail");
     const detail = tui.render();
-    expect(detail).toContain("[search]");
+    expect(detail).toContain("[list]");
     expect(detail).toContain("package details");
     expect(detail).toContain("Package: stylua");
     await tui.handleInput("escape");
@@ -206,7 +206,7 @@ describe("Mason TUI core", () => {
       selectedRow: (text) => `\x1b[48;5;240m${text}\x1b[49m`,
     });
 
-    expect(lines.join("\n")).toContain("\x1b[48;5;27m[search]");
+    expect(lines.join("\n")).toContain("\x1b[48;5;27m [list]");
     expect(lines.join("\n")).toContain("\x1b[48;5;240m> stylua");
     expect(lines.every((line) => stripAnsi(line).length <= 72)).toBe(true);
   });
@@ -232,14 +232,15 @@ describe("Mason TUI core", () => {
     const tui = createMasonTui(fake);
     await tui.runCurrent();
 
-    await tui.handleInput("tab");
     expect(tui.state.command).toBe("list");
+    await tui.handleInput("tab");
+    expect(tui.state.command).toBe("installed");
     await tui.handleInput("right");
+    expect(tui.state.command).toBe("install");
+    await tui.handleInput("left");
     expect(tui.state.command).toBe("installed");
     await tui.handleInput("left");
     expect(tui.state.command).toBe("list");
-    await tui.handleInput("shift+tab");
-    expect(tui.state.command).toBe("search");
   });
 
   test("keeps the TUI canvas height stable across command views", async () => {
@@ -270,18 +271,24 @@ describe("Mason TUI core", () => {
     };
     const tui = createMasonTui(fake);
 
-    const firstList = tui.handleInput("tab");
-    const installed = tui.handleInput("tab");
+    const firstInstalled = tui.handleInput("tab");
+    const firstList = tui.handleInput("left");
+    const secondInstalled = tui.handleInput("right");
     const secondList = tui.handleInput("left");
 
-    expect(pending.map((item) => item.args)).toEqual([["list"], ["list", "--installed"], ["list"]]);
-    pending[2]!.resolve(packages());
+    expect(pending.map((item) => item.args)).toEqual([
+      ["list", "--installed"],
+      ["list"],
+      ["list", "--installed"],
+      ["list"],
+    ]);
+    pending[3]!.resolve(packages());
     await secondList;
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("Description");
     expect(tui.render()).not.toContain("Installed At");
 
-    pending[1]!.resolve([
+    pending[2]!.resolve([
       {
         name: "lua-language-server",
         version: "v3.8.0",
@@ -289,13 +296,26 @@ describe("Mason TUI core", () => {
         installed_at: "2026-05-24T00:00:00Z",
       },
     ]);
-    await installed;
+    await secondInstalled;
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("Description");
     expect(tui.render()).not.toContain("Installed At");
 
-    pending[0]!.resolve(packages());
+    pending[1]!.resolve(packages());
     await firstList;
+    expect(tui.state.command).toBe("list");
+    expect(tui.render()).toContain("Description");
+    expect(tui.render()).not.toContain("Installed At");
+
+    pending[0]!.resolve([
+      {
+        name: "lua-language-server",
+        version: "v3.8.0",
+        bins: { "lua-language-server": "bin/lua-language-server" },
+        installed_at: "2026-05-24T00:00:00Z",
+      },
+    ]);
+    await firstInstalled;
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("Description");
     expect(tui.render()).not.toContain("Installed At");
