@@ -1,5 +1,6 @@
 *.log
 .DS_Store
+mason4agents-*.tgz
 dist/
 native/
 node_modules/
