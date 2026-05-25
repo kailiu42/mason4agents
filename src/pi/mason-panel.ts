@@ -57,6 +57,10 @@ export interface MasonPanel {
   renderLines(width: number): string[];
 }
 
+export interface MasonPanelOptions {
+  syncLspConfig?: () => unknown;
+}
+
 const PANEL_COMMANDS: readonly PanelCommand[] = [
   { id: "search", label: "search", inputLabel: "query" },
   { id: "list", label: "list" },
@@ -73,7 +77,7 @@ const PANEL_COMMANDS: readonly PanelCommand[] = [
 
 const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 
-export function createMasonPanel(bridge: CliBridge): MasonPanel {
+export function createMasonPanel(bridge: CliBridge, options: MasonPanelOptions = {}): MasonPanel {
   const state: MasonPanelState = {
     command: "search",
     commandIndex: 0,
@@ -107,6 +111,7 @@ export function createMasonPanel(bridge: CliBridge): MasonPanel {
     try {
       const data = await bridge.run(planned.argv);
       state.lastAction = data;
+      if (planned.syncLspConfig) syncLspConfig(options);
       state.model = modelForResult(planned.resultKind, data, planned.title);
       state.packages = Array.isArray(data) && (planned.resultKind === "packages" || planned.resultKind === "installed") ? data : state.packages;
     } catch (err) {
@@ -136,14 +141,17 @@ export function createMasonPanel(bridge: CliBridge): MasonPanel {
     },
     async install(packages: string[]) {
       state.lastAction = await bridge.run(["install", ...packages]);
+      syncLspConfig(options);
       return this.search(state.query, { category: state.category, language: state.language });
     },
     async uninstall(packages: string[]) {
       state.lastAction = await bridge.run(["uninstall", ...packages]);
+      syncLspConfig(options);
       return this.search(state.query, { category: state.category, language: state.language });
     },
     async update(packages: string[] = []) {
       state.lastAction = await bridge.run(["update", ...packages]);
+      syncLspConfig(options);
       return this.search(state.query, { category: state.category, language: state.language });
     },
     async doctor() {
@@ -219,8 +227,8 @@ export function createMasonPanel(bridge: CliBridge): MasonPanel {
   return panel;
 }
 
-export async function openMasonPanel(ctx: unknown, bridge: CliBridge): Promise<MasonPanel> {
-  const panel = createMasonPanel(bridge);
+export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: MasonPanelOptions = {}): Promise<MasonPanel> {
+  const panel = createMasonPanel(bridge, options);
   await panel.runCurrent();
 
   const anyCtx = ctx as { hasUI?: boolean; ui?: { custom?: (factory: Function) => unknown } };
@@ -248,6 +256,7 @@ interface PanelInvocation {
   argv: string[];
   resultKind: MasonResultKind;
   title: string;
+  syncLspConfig?: boolean;
 }
 
 function buildInvocation(state: MasonPanelState): PanelInvocation {
@@ -261,15 +270,15 @@ function buildInvocation(state: MasonPanelState): PanelInvocation {
     case "install": {
       const packages = splitInput(state.inputs.install);
       if (packages.length === 0) throw new MasonCommandInputError("install requires package names. Press e to enter packages.");
-      return { argv: ["install", ...packages], resultKind: "install", title: "mason install" };
+      return { argv: ["install", ...packages], resultKind: "install", title: "mason install", syncLspConfig: true };
     }
     case "uninstall": {
       const packages = splitInput(state.inputs.uninstall);
       if (packages.length === 0) throw new MasonCommandInputError("uninstall requires package names. Press e to enter packages.");
-      return { argv: ["uninstall", ...packages], resultKind: "uninstall", title: "mason uninstall" };
+      return { argv: ["uninstall", ...packages], resultKind: "uninstall", title: "mason uninstall", syncLspConfig: true };
     }
     case "update":
-      return { argv: ["update", ...splitInput(state.inputs.update)], resultKind: "install", title: "mason update" };
+      return { argv: ["update", ...splitInput(state.inputs.update)], resultKind: "install", title: "mason update", syncLspConfig: true };
     case "which": {
       const executable = splitInput(state.inputs.which);
       if (executable.length !== 1) throw new MasonCommandInputError("which requires one executable. Press e to enter it.");
@@ -287,6 +296,10 @@ function buildInvocation(state: MasonPanelState): PanelInvocation {
     case "bin-dir":
       return { argv: ["bin-dir"], resultKind: "bin-dir", title: "mason bin-dir" };
   }
+}
+
+function syncLspConfig(options: MasonPanelOptions): void {
+  options.syncLspConfig?.();
 }
 
 function buildSearchInvocation(state: MasonPanelState): PanelInvocation {

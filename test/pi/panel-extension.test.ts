@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { CliBridge } from "../../src/pi/cli";
 import { activate } from "../../src/pi/extension";
 import { createMasonPanel, openMasonPanel } from "../../src/pi/mason-panel";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -88,7 +88,8 @@ function bridge() {
 describe("Mason panel", () => {
   test("searches, renders tables, installs, uninstalls, updates, and doctors through bridge", async () => {
     const { bridge: fake, calls } = bridge();
-    const panel = createMasonPanel(fake);
+    let syncs = 0;
+    const panel = createMasonPanel(fake, { syncLspConfig: () => { syncs += 1; } });
     await panel.search("lua", { category: "Formatter", language: "Lua" });
     const rendered = panel.render();
     expect(rendered).toContain("stylua");
@@ -103,6 +104,7 @@ describe("Mason panel", () => {
     expect(calls).toContainEqual(["uninstall", "stylua"]);
     expect(calls).toContainEqual(["update", "stylua"]);
     expect(calls).toContainEqual(["doctor"]);
+    expect(syncs).toBe(3);
   });
 
   test("filters locally, edits language, and shows installed table state", async () => {
@@ -130,6 +132,20 @@ describe("Mason panel", () => {
     await panel.handleInput("tab");
     expect(panel.render()).toContain("Installed At");
     expect(panel.render()).toContain("lua-language-server");
+  });
+
+  test("runCurrent syncs LSP config for package-changing commands", async () => {
+    const { bridge: fake, calls } = bridge();
+    let syncs = 0;
+    const panel = createMasonPanel(fake, { syncLspConfig: () => { syncs += 1; } });
+    panel.state.command = "install";
+    panel.state.commandIndex = 3;
+    panel.state.inputs.install = "stylua";
+
+    await panel.runCurrent();
+
+    expect(calls).toContainEqual(["install", "stylua"]);
+    expect(syncs).toBe(1);
   });
 
   test("renders custom UI as line arrays with bounded width", async () => {
@@ -205,6 +221,142 @@ describe("Pi extension", () => {
       expect(String((messages[1] as { content?: unknown }).content)).toContain("stylua");
       expect(String((messages[1] as { content?: unknown }).content)).not.toContain("{");
       expect(messages[2]).toMatchObject({ customType: "mason4agents-doctor", display: true });
+    } finally {
+      process.env.HOME = oldHome;
+      if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
+      process.env.PATH = oldPath;
+    }
+  });
+
+  test("default bridge resolves binaries from OMP original extension path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
+    roots.push(root);
+    const oldHome = process.env.HOME;
+    const oldData = process.env.MASON4AGENTS_DATA_HOME;
+    const oldPath = process.env.PATH;
+    process.env.HOME = root;
+    process.env.MASON4AGENTS_DATA_HOME = join(root, "data");
+    process.env.PATH = "/usr/bin";
+    const packageRoot = join(root, "pkg");
+    const native = join(packageRoot, "native", process.platform === "win32" ? `mason4agents-${process.platform}-${process.arch}.exe` : `mason4agents-${process.platform}-${process.arch}`);
+    mkdirSync(join(packageRoot, "dist", "pi"), { recursive: true });
+    mkdirSync(join(packageRoot, "native"), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "mason4agents" }));
+    writeFileSync(native, `#!/bin/sh\nprintf '%s\\n' '{"ok":true,"data":{"ok":true,"paths":{"bin_dir":"/tmp/bin","bin_dir_exists":true,"data_dir_writable":true},"registry":{"cache_present":true,"package_count":1},"path_env":{"contains_bin_dir":true,"bin_dir_first":true},"managers":[]}}'\n`);
+    chmodSync(native, 0o755);
+    const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const messages: unknown[] = [];
+    const ctx = {
+      extension: { resolvedPath: join(packageRoot, "dist", "pi", "extension.js") },
+      commands: {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+          handlers[name] = options.handler;
+        },
+      },
+      tools: { registerTool() {} },
+      events: { on() {} },
+      sendMessage(message: unknown) { messages.push(message); },
+    };
+    try {
+      await activate(ctx);
+      await handlers["mason-doctor"]?.("", { hasUI: false });
+      expect(messages).toHaveLength(1);
+      expect(String((messages[0] as { content?: unknown }).content)).toContain("Overall: ok");
+    } finally {
+      process.env.HOME = oldHome;
+      if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
+      process.env.PATH = oldPath;
+    }
+  });
+
+  test("direct command errors publish and return without opening custom UI", async () => {
+    const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
+    roots.push(root);
+    const oldHome = process.env.HOME;
+    const oldData = process.env.MASON4AGENTS_DATA_HOME;
+    const oldPath = process.env.PATH;
+    process.env.HOME = root;
+    process.env.MASON4AGENTS_DATA_HOME = join(root, "data");
+    process.env.PATH = "/usr/bin";
+    const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const messages: unknown[] = [];
+    let customCalls = 0;
+    const ctx = {
+      commands: {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+          handlers[name] = options.handler;
+        },
+      },
+      tools: { registerTool() {} },
+      events: { on() {} },
+      sendMessage(message: unknown) { messages.push(message); },
+    };
+    const failing: CliBridge = {
+      async run() {
+        throw new Error("Unable to locate mason4agents native binary.");
+      },
+    };
+    const commandCtx = {
+      hasUI: true,
+      ui: {
+        custom() {
+          customCalls += 1;
+          throw new Error("direct commands must not open custom UI");
+        },
+      },
+    };
+    try {
+      await activate(ctx, failing);
+      await handlers.mason?.("doctor", commandCtx);
+      await handlers["mason-doctor"]?.("", commandCtx);
+      expect(customCalls).toBe(0);
+      expect(messages).toHaveLength(2);
+      expect(String((messages[0] as { content?: unknown }).content)).toContain("Error: Unable to locate mason4agents native binary.");
+      expect(messages[1]).toMatchObject({ customType: "mason4agents-doctor", display: true });
+    } finally {
+      process.env.HOME = oldHome;
+      if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
+      process.env.PATH = oldPath;
+    }
+  });
+
+  test("direct install command syncs OMP LSP config after package changes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
+    roots.push(root);
+    const oldHome = process.env.HOME;
+    const oldData = process.env.MASON4AGENTS_DATA_HOME;
+    const oldPath = process.env.PATH;
+    process.env.HOME = root;
+    process.env.MASON4AGENTS_DATA_HOME = join(root, "data");
+    process.env.PATH = "/usr/bin";
+    const binDir = join(root, "data", "mason4agents", "bin");
+    const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const ctx = {
+      commands: {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+          handlers[name] = options.handler;
+        },
+      },
+      tools: { registerTool() {} },
+      events: { on() {} },
+      sendMessage() {},
+    };
+    const installing: CliBridge = {
+      async run(args: string[]) {
+        if (args[0] === "install") {
+          mkdirSync(binDir, { recursive: true });
+          writeFileSync(join(binDir, "rust-analyzer"), "");
+        }
+        return { args };
+      },
+    };
+    try {
+      await activate(ctx, installing);
+      await handlers.mason?.("install rust-analyzer", { hasUI: false });
+      const generated = JSON.parse(readFileSync(join(root, ".omp", "agent", "lsp.json"), "utf8")) as {
+        servers?: Record<string, { command?: string }>;
+      };
+      expect(generated.servers?.["rust-analyzer"]?.command).toBe(join(binDir, "rust-analyzer"));
     } finally {
       process.env.HOME = oldHome;
       if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;

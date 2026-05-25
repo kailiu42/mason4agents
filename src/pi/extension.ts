@@ -1,10 +1,12 @@
 import { createCliBridge } from "./cli";
 import type { CliBridge } from "./cli";
-import { executeMasonCommand } from "./mason-command";
+import { executeMasonCommand, parseMasonCommandInput } from "./mason-command";
 import { openMasonPanel } from "./mason-panel";
 import { modelSupportsFiltering, renderDisplay, renderDisplayText, type DisplayModel } from "./mason-render";
 import { registerPiTools } from "./pi-tools";
 import { ensureMasonBinOnPath } from "./path-env";
+import { syncMasonLspConfig } from "./lsp-config";
+import { pathToFileURL } from "node:url";
 
 export interface PiActivationResult {
   name: "mason4agents";
@@ -12,28 +14,28 @@ export interface PiActivationResult {
   tools: unknown[];
 }
 
-export async function activate(ctx: unknown, bridge: CliBridge = createCliBridge()): Promise<PiActivationResult> {
+export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActivationResult> {
   const pathInfo = ensureMasonBinOnPath();
+  syncMasonLspConfig();
   const apiCtx = ctx;
-
+  const cliBridge = bridge ?? createCliBridge(undefined, extensionStartUrl(ctx));
   registerCommand(ctx, "mason", "Open mason4agents package manager", async (args, commandCtx) => {
     try {
       const input = typeof args === "string" ? args.trim() : "";
       const shownInUi = canShowCustomUi(commandCtx);
       if (input.length === 0) {
-        const panel = await openMasonPanel(commandCtx, bridge);
+        const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncMasonLspConfig });
         if (!shownInUi) {
           publishMessage(apiCtx, "mason4agents", panel.render());
         }
         return;
       }
 
-      const model = await executeMasonCommand(input, bridge);
-      if (shownInUi) {
-        await showDisplayPanel(commandCtx, model);
-      } else {
-        publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
+      const model = await executeMasonCommand(input, cliBridge);
+      if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
+        syncMasonLspConfig();
       }
+      publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason", err);
     }
@@ -41,19 +43,18 @@ export async function activate(ctx: unknown, bridge: CliBridge = createCliBridge
 
   registerCommand(ctx, "mason-doctor", "Run mason4agents doctor", async (_args, commandCtx) => {
     try {
-      const model = await executeMasonCommand("doctor", bridge);
-      if (canShowCustomUi(commandCtx)) {
-        await showDisplayPanel(commandCtx, model);
-      } else {
-        publishMessage(apiCtx, "mason4agents-doctor", renderDisplayText(model));
-      }
+      const model = await executeMasonCommand("doctor", cliBridge);
+      publishMessage(apiCtx, "mason4agents-doctor", renderDisplayText(model));
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason-doctor", err);
     }
   });
 
-  const tools = registerPiTools(ctx, bridge);
-  registerSessionStart(ctx, () => ensureMasonBinOnPath());
+  const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: syncMasonLspConfig });
+  registerSessionStart(ctx, () => {
+    ensureMasonBinOnPath();
+    syncMasonLspConfig();
+  });
   return { name: "mason4agents", binDir: pathInfo.binDir, tools };
 }
 
@@ -125,13 +126,23 @@ async function showDisplayPanel(ctx: unknown, model: DisplayModel): Promise<void
   });
 }
 
-function publishMessage(ctx: unknown, customType: string, content: string): void {
+function publishMessage(ctx: unknown, customType: string, content: string): boolean {
   const anyCtx = ctx as {
     sendMessage?: (message: unknown, options?: unknown) => unknown;
   };
   if (typeof anyCtx.sendMessage === "function") {
     anyCtx.sendMessage({ customType, content, display: true }, { deliverAs: "nextTurn" });
+    return true;
   }
+  return false;
+}
+
+function extensionStartUrl(ctx: unknown): string {
+  const extension = (ctx as { extension?: { resolvedPath?: unknown; path?: unknown } }).extension;
+  const path = typeof extension?.resolvedPath === "string" ? extension.resolvedPath : typeof extension?.path === "string" ? extension.path : "";
+  if (path.length === 0) return import.meta.url;
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(path)) return path;
+  return pathToFileURL(path).href;
 }
 
 function reportCommandError(commandCtx: unknown, apiCtx: unknown, command: string, err: unknown): void {
@@ -141,6 +152,15 @@ function reportCommandError(commandCtx: unknown, apiCtx: unknown, command: strin
     anyCommandCtx.ui.notify(`${command}: ${msg}`, "error");
   } else {
     publishMessage(apiCtx, `mason4agents-${command}-error`, `${command}: ${msg}`);
+  }
+}
+
+function shouldSyncLspConfigAfterMasonCommand(input: string): boolean {
+  try {
+    const parsed = parseMasonCommandInput(input);
+    return parsed.kind === "command" && (parsed.command === "install" || parsed.command === "update" || parsed.command === "uninstall");
+  } catch {
+    return false;
   }
 }
 
@@ -178,7 +198,7 @@ function truncateToWidth(value: string, width: number): string {
 }
 
 function isCloseKey(key: string): boolean {
-  return key === "q" || key === "\x1b" || key === "escape" || key === "esc";
+  return key === "q" || key === "\x03" || key === "ctrl+c" || key === "ctrl-c" || key === "\x1b" || key === "escape" || key === "esc";
 }
 
 function isScrollDownKey(key: string): boolean {

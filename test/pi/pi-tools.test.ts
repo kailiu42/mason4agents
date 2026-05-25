@@ -16,7 +16,8 @@ function fakeBridge() {
 describe("Pi tools", () => {
   test("expose schemas and map inputs to CLI argv", async () => {
     const { bridge, calls } = fakeBridge();
-    const tools = createPiTools(bridge);
+    let syncs = 0;
+    const tools = createPiTools(bridge, { syncLspConfig: () => { syncs += 1; } });
     expect(tools.map((tool) => tool.name)).toEqual([
       "mason_list",
       "mason_search",
@@ -30,15 +31,20 @@ describe("Pi tools", () => {
 
     await tools.find((tool) => tool.name === "mason_search")!.execute("1", { query: "lua", category: "LSP", language: "Lua" });
     await tools.find((tool) => tool.name === "mason_install")!.execute("2", { packages: ["stylua"], registry: "file:///tmp/reg", allow_build_scripts: true });
-    await tools.find((tool) => tool.name === "mason_which")!.execute("3", { executable: "stylua" });
-    await tools.find((tool) => tool.name === "mason_env")!.execute("4", { shell: "bash" });
+    await tools.find((tool) => tool.name === "mason_uninstall")!.execute("3", { packages: ["stylua"] });
+    await tools.find((tool) => tool.name === "mason_update")!.execute("4", { packages: [] });
+    await tools.find((tool) => tool.name === "mason_which")!.execute("5", { executable: "stylua" });
+    await tools.find((tool) => tool.name === "mason_env")!.execute("6", { shell: "bash" });
 
     expect(calls).toEqual([
       ["search", "lua", "--category", "LSP", "--language", "Lua"],
       ["install", "stylua", "--registry", "file:///tmp/reg", "--allow-build-scripts"],
+      ["uninstall", "stylua"],
+      ["update"],
       ["which", "stylua"],
       ["env", "--shell", "bash"]
     ]);
+    expect(syncs).toBe(3);
   });
 
   test("validates required tool inputs", async () => {

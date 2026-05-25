@@ -17,37 +17,41 @@ export interface PiToolResult {
 
 type ToolExecutor = (input: unknown, options?: { signal?: AbortSignal }) => Promise<PiToolResult>;
 
-export function createPiTools(bridge: CliBridge): PiToolDefinition[] {
+export interface PiToolsOptions {
+  syncLspConfig?: () => unknown;
+}
+
+export function createPiTools(bridge: CliBridge, toolOptions: PiToolsOptions = {}): PiToolDefinition[] {
   return [
-    tool("mason_list", "mason list", "List Mason packages", listSchema(), async (input, options) => {
+    tool("mason_list", "mason list", "List Mason packages", listSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const argv = ["list"];
       if (args.installed === true) argv.push("--installed");
       if (args.outdated === true) argv.push("--outdated");
-      return result(await bridge.run(argv, options));
+      return result(await bridge.run(argv, runOptions));
     }),
-    tool("mason_search", "mason search", "Search Mason Registry packages", searchSchema(), async (input, options) => {
+    tool("mason_search", "mason search", "Search Mason Registry packages", searchSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const argv = ["search"];
       if (typeof args.query === "string" && args.query.length > 0) argv.push(args.query);
       if (typeof args.category === "string" && args.category.length > 0) argv.push("--category", args.category);
       if (typeof args.language === "string" && args.language.length > 0) argv.push("--language", args.language);
-      return result(await bridge.run(argv, options));
+      return result(await bridge.run(argv, runOptions));
     }),
-    tool("mason_install", "mason install", "Install Mason packages", installSchema(), async (input, options) => {
+    tool("mason_install", "mason install", "Install Mason packages", installSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const packages = validateStringArray(args.packages, "packages");
       const argv = ["install", ...packages];
       if (typeof args.registry === "string" && args.registry.length > 0) argv.push("--registry", args.registry);
       if (args.allow_build_scripts === true) argv.push("--allow-build-scripts");
-      return result(await bridge.run(argv, options));
+      return result(await runAndSync(bridge, argv, runOptions, toolOptions.syncLspConfig));
     }),
-    tool("mason_uninstall", "mason uninstall", "Uninstall Mason packages", uninstallSchema(), async (input, options) => {
+    tool("mason_uninstall", "mason uninstall", "Uninstall Mason packages", uninstallSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const packages = validateStringArray(args.packages, "packages");
-      return result(await bridge.run(["uninstall", ...packages], options));
+      return result(await runAndSync(bridge, ["uninstall", ...packages], runOptions, toolOptions.syncLspConfig));
     }),
-    tool("mason_update", "mason update", "Update Mason packages", updateSchema(), async (input, options) => {
+    tool("mason_update", "mason update", "Update Mason packages", updateSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const packages = args.packages === undefined || (Array.isArray(args.packages) && args.packages.length === 0)
         ? []
@@ -55,23 +59,23 @@ export function createPiTools(bridge: CliBridge): PiToolDefinition[] {
       const argv = ["update", ...packages];
       if (typeof args.registry === "string" && args.registry.length > 0) argv.push("--registry", args.registry);
       if (args.allow_build_scripts === true) argv.push("--allow-build-scripts");
-      return result(await bridge.run(argv, options));
+      return result(await runAndSync(bridge, argv, runOptions, toolOptions.syncLspConfig));
     }),
-    tool("mason_which", "mason which", "Resolve an installed executable", whichSchema(), async (input, options) => {
+    tool("mason_which", "mason which", "Resolve an installed executable", whichSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       if (typeof args.executable !== "string" || args.executable.length === 0) throw new Error("executable must be a non-empty string");
-      return result(await bridge.run(["which", args.executable], options));
+      return result(await bridge.run(["which", args.executable], runOptions));
     }),
-    tool("mason_env", "mason env", "Print PATH setup for shells", envSchema(), async (input, options) => {
+    tool("mason_env", "mason env", "Print PATH setup for shells", envSchema(), async (input, runOptions) => {
       const args = validateObject(input);
       const shell = typeof args.shell === "string" && args.shell.length > 0 ? args.shell : "json";
-      return result(await bridge.run(["env", "--shell", shell], options));
+      return result(await bridge.run(["env", "--shell", shell], runOptions));
     })
   ];
 }
 
-export function registerPiTools(ctx: unknown, bridge: CliBridge): PiToolDefinition[] {
-  const tools = createPiTools(bridge);
+export function registerPiTools(ctx: unknown, bridge: CliBridge, options: PiToolsOptions = {}): PiToolDefinition[] {
+  const tools = createPiTools(bridge, options);
   for (const definition of tools) {
     registerTool(ctx, definition);
   }
@@ -107,6 +111,12 @@ function registerTool(ctx: unknown, definition: PiToolDefinition): void {
 
 function result(details: unknown): PiToolResult {
   return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
+}
+
+async function runAndSync(bridge: CliBridge, argv: string[], options: { signal?: AbortSignal } | undefined, syncLspConfig: (() => unknown) | undefined): Promise<unknown> {
+  const details = await bridge.run(argv, options);
+  syncLspConfig?.();
+  return details;
 }
 
 function validateObject(input: unknown): Record<string, unknown> {
