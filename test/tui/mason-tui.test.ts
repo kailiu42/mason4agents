@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { modelForResult, renderDisplay } from "../../src/tui/mason-render";
-import { createMasonTui, MASON_TUI_COMMANDS, type MasonTuiCommandId, type MasonTuiHost } from "../../src/tui/mason-tui";
+import { createMasonTui, MASON_TUI_COMMANDS, type MasonTuiHost } from "../../src/tui/mason-tui";
 
 function packages() {
   return [
@@ -189,9 +189,22 @@ describe("Mason TUI core", () => {
     expect(detail).toContain("[list]");
     expect(detail).toContain("package details");
     expect(detail).toContain("Package: stylua");
-    await tui.handleInput("escape");
+    expect(detail).toContain("[i]: install");
+    expect(detail).toContain("[u]: update");
+    expect(detail).toContain("[r]: uninstall");
+    await tui.handleInput("\x1b[27u");
     expect(tui.state.view).toBe("list");
     expect(tui.render()).not.toContain("package details");
+
+    await tui.handleInput("enter");
+    expect(tui.state.view).toBe("detail");
+    await tui.handleInput("\x1b[27;1;27~");
+    expect(tui.state.view).toBe("list");
+
+    await tui.handleInput("enter");
+    expect(tui.state.view).toBe("detail");
+    await tui.handleInput("q");
+    expect(tui.state.view).toBe("list");
   });
 
   test("renders theme-aware header and selected-row styling without changing visible width", async () => {
@@ -201,14 +214,30 @@ describe("Mason TUI core", () => {
 
     const lines = tui.renderLines(72, {
       tabBar: (text) => `\x1b[48;5;236m${text}\x1b[49m`,
+      tabSeparator: (text) => `\x1b[38;5;244m${text}\x1b[39m`,
       activeTab: (text) => `\x1b[48;5;27m${text}\x1b[49m`,
       tableHeader: (text) => `\x1b[48;5;238m${text}\x1b[49m`,
       selectedRow: (text) => `\x1b[48;5;240m${text}\x1b[49m`,
+      shortcutKey: (text) => `\x1b[38;5;39m${text}\x1b[39m`,
+      shortcutAction: (text) => `\x1b[38;5;250m${text}\x1b[39m`,
     });
 
-    expect(lines.join("\n")).toContain("\x1b[48;5;27m [list]");
+    expect(lines.join("\n")).toContain("\x1b[48;5;27m[list]");
+    expect(lines.join("\n")).toContain("\x1b[38;5;244m  ╱  \x1b[39m");
+    expect(lines.join("\n")).not.toContain("\x1b[48;5;27m  ╱");
     expect(lines.join("\n")).toContain("\x1b[48;5;240m> stylua");
+    expect(lines.join("\n")).toContain("\x1b[38;5;39m[/]\x1b[39m");
+    expect(lines.join("\n")).toContain("\x1b[38;5;250mname\x1b[39m");
     expect(lines.every((line) => stripAnsi(line).length <= 72)).toBe(true);
+
+    await tui.handleInput("enter");
+    const detailLines = tui.renderLines(96, {
+      detailLabel: (text) => `\x1b[38;5;244m${text}\x1b[39m`,
+      detailName: (text) => `\x1b[38;5;39m${text}\x1b[39m`,
+      detailActionKey: (text) => `\x1b[38;5;39m${text}\x1b[39m`,
+    }).join("\n");
+    expect(detailLines).toContain("\x1b[38;5;244mPackage: \x1b[39m\x1b[38;5;39mstylua\x1b[39m");
+    expect(detailLines).toContain("\x1b[38;5;39m[i]\x1b[39m");
   });
 
   test("runs package actions from the selected row and refreshes", async () => {
@@ -228,19 +257,72 @@ describe("Mason TUI core", () => {
   });
 
   test("switches tabs with tab and arrows", async () => {
-    const { host: fake } = host();
+    const { host: fake, calls } = host();
     const tui = createMasonTui(fake);
     await tui.runCurrent();
 
+    expect(MASON_TUI_COMMANDS.map((command) => command.label)).toEqual(["list", "installed", "check update", "refresh", "doctor"]);
     expect(tui.state.command).toBe("list");
+    expect(tui.render()).toContain("╱");
     await tui.handleInput("tab");
     expect(tui.state.command).toBe("installed");
     await tui.handleInput("right");
-    expect(tui.state.command).toBe("install");
-    await tui.handleInput("left");
+    expect(tui.state.command).toBe("update");
+    expect(tui.render()).toContain("[check update]");
+    expect(calls).toContainEqual(["list", "--outdated"]);
+    await tui.handleInput("right");
+    expect(tui.state.command).toBe("refresh");
+    expect(tui.render()).toContain("[r]: refresh registry");
+    expect(calls).not.toContainEqual(["refresh"]);
+    await tui.handleInput("r");
+    expect(calls).toContainEqual(["refresh"]);
+    await tui.handleInput("\x1b[9;2u");
+    expect(tui.state.command).toBe("update");
+    await tui.handleInput("\x1b[27;2;9~");
     expect(tui.state.command).toBe("installed");
     await tui.handleInput("left");
     expect(tui.state.command).toBe("list");
+  });
+
+  test("filters list rows by name and language without running search", async () => {
+    const calls: string[][] = [];
+    const fake: MasonTuiHost = {
+      async runCli(args: string[]) {
+        calls.push(args);
+        return [
+          ...packages(),
+          {
+            name: "typescript-language-server",
+            version: "v4.0.0",
+            installed: false,
+            installed_version: null,
+            outdated: false,
+            deprecated: false,
+            languages: ["TypeScript", "JavaScript"],
+            categories: ["LSP"],
+            description: "TypeScript LSP",
+          },
+        ];
+      },
+    };
+    const tui = createMasonTui(fake);
+    await tui.runCurrent();
+
+    await tui.handleInput("l");
+    for (const key of "TypeScript") await tui.handleInput(key);
+    await tui.handleInput("enter");
+
+    expect(tui.render()).toContain("typescript-language-server");
+    expect(tui.render()).not.toContain("> stylua");
+    expect(calls).toEqual([["list"]]);
+
+    await tui.handleInput("/");
+    for (const key of "server") await tui.handleInput(key);
+    await tui.handleInput("enter");
+
+    expect(tui.render()).toContain("typescript-language-server");
+    expect(tui.render()).not.toContain("lua-language-server");
+    expect(calls).toEqual([["list"]]);
   });
 
   test("keeps the TUI canvas height stable across command views", async () => {
@@ -248,7 +330,7 @@ describe("Mason TUI core", () => {
     const tui = createMasonTui(fake);
     await tui.runCurrent();
     const expectedHeight = tui.renderLines(120).length;
-    const commands: MasonTuiCommandId[] = ["list", "installed", "install", "uninstall", "update", "which", "refresh", "doctor", "env", "bin-dir"];
+    const commands = MASON_TUI_COMMANDS.map((item) => item.id);
 
     for (const command of commands) {
       tui.state.command = command;

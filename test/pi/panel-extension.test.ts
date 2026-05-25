@@ -156,15 +156,18 @@ describe("Mason panel", () => {
     expect(panel.render()).toContain("lua-language-server");
     expect(panel.render()).not.toContain("stylua");
 
-    await panel.handleInput("shift+tab");
+    await panel.handleInput("/");
+    for (let index = 0; index < "lang".length; index += 1) await panel.handleInput("backspace");
+    await panel.handleInput("enter");
+    const callCount = calls.length;
     await panel.handleInput("l");
     await panel.handleInput("L");
     await panel.handleInput("u");
     await panel.handleInput("a");
     await panel.handleInput("enter");
-    expect(calls).toContainEqual(["search", "--language", "Lua"]);
+    expect(panel.render()).toContain("language=Lua");
+    expect(calls).toHaveLength(callCount);
 
-    await panel.handleInput("tab");
     await panel.handleInput("tab");
     expect(panel.render()).toContain("Installed At");
     expect(panel.render()).toContain("lua-language-server");
@@ -186,7 +189,7 @@ describe("Mason panel", () => {
 
   test("renders custom UI as line arrays with bounded width", async () => {
     const { bridge: fake } = bridge();
-    let component: { render(width: number): unknown; handleInput(key: string): void } | undefined;
+    let component: { render(width: number): unknown; handleInput(...keys: unknown[]): void } | undefined;
     let customOptions: unknown;
     let closed = false;
     const ctx = {
@@ -213,12 +216,18 @@ describe("Mason panel", () => {
     expect((lines as string[]).join("\n")).toContain("stylua");
     expect((lines as string[]).every((line) => stripAnsi(line).length <= 24)).toBe(true);
     component?.handleInput("/");
-    expect((component?.render(24) as string[]).join("\n")).toContain("filter>");
-    component?.handleInput("escape");
+    expect((component?.render(24) as string[]).join("\n")).toContain("name>");
+    component?.handleInput("\x1b[27u");
     component?.handleInput("enter");
     expect((component?.render(48) as string[]).join("\n")).toContain("package details");
-    component?.handleInput("escape");
+    component?.handleInput("\x1b[27;1;27~");
     expect((component?.render(48) as string[]).join("\n")).not.toContain("package details");
+    component?.handleInput("tab");
+    await Promise.resolve();
+    expect((component?.render(48) as string[]).join("\n")).toContain("[installed]");
+    component?.handleInput("\x1b[9;2u");
+    await Promise.resolve();
+    expect((component?.render(48) as string[]).join("\n")).toContain("[list]");
     component?.handleInput("q");
     await Promise.resolve();
     expect(closed).toBe(true);

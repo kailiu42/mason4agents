@@ -46,8 +46,8 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
           startInitialLoad();
           return panel.renderLines(width, styleFromPiTheme(theme));
         },
-        handleInput(key: string) {
-          void panel.handleInput(key).then((result) => {
+        handleInput(...keys: unknown[]) {
+          void panel.handleInput(...keys).then((result) => {
             if (result === "close") {
               closed = true;
               done(undefined);
@@ -124,12 +124,13 @@ function styleFromPiTheme(theme: unknown): MasonTuiStyle | undefined {
   const bold = (text: string) => typeof record?.bold === "function" ? record.bold(text) : text;
   const selected = (text: string) => bg("selectedBg", fg("text", text));
   const toolHeader = (text: string) => bg("customMessageBg", fg("toolTitle", bold(text)));
-  const popupBody = (text: string) => bg("customMessageBg", fg("customMessageText", text));
+  const popupBody = (text: string) => bg("customMessageBg", text);
   return {
     title: (text) => fg("toolTitle", bold(text)),
     tabBar: (text) => bg("customMessageBg", text),
     tab: (text) => bg("customMessageBg", fg("muted", text)),
     activeTab: (text) => bg("selectedBg", fg("accent", bold(text))),
+    tabSeparator: (text) => bg("customMessageBg", fg("borderMuted", text)),
     stateLine: (text) => fg("muted", text),
     divider: (text) => fg("borderAccent", text),
     edit: (text) => fg("accent", text),
@@ -139,8 +140,16 @@ function styleFromPiTheme(theme: unknown): MasonTuiStyle | undefined {
     tableSeparator: (text) => fg("borderMuted", text),
     selectedRow: selected,
     help: (text) => fg("dim", text),
+    shortcutKey: (text) => fg("accent", bold(text)),
+    shortcutAction: (text) => fg("customMessageText", text),
     popupBorder: (text) => fg("borderAccent", text),
     popupTitle: (text) => bg("selectedBg", fg("accent", bold(text))),
     popupBody,
+    detailLabel: (text) => fg("muted", text),
+    detailValue: (text) => fg("customMessageText", text),
+    detailName: (text) => fg("accent", bold(text)),
+    detailStatus: (text) => fg("accent", text),
+    detailActionKey: (text) => fg("accent", bold(text)),
+    detailAction: (text) => fg("customMessageText", text),
   };
 }

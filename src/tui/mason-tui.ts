@@ -1,5 +1,5 @@
 import { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
-import { errorDisplay, modelForResult, renderDisplay, type DisplayModel, type MasonResultKind, type RenderOptions, type RenderStyle } from "./mason-render";
+import { errorDisplay, modelForResult, renderDisplay, renderInlineShortcutText, renderShortcutLine, shortcutText, type DisplayModel, type MasonResultKind, type RenderOptions, type RenderStyle, type ShortcutAction } from "./mason-render";
 
 export type MasonTuiCommandId =
   | "search"
@@ -21,7 +21,7 @@ export interface MasonTuiCommand {
 }
 
 export interface MasonTuiEdit {
-  kind: "filter" | "language" | "input";
+  kind: "name" | "language" | "input";
   draft: string;
 }
 
@@ -62,6 +62,7 @@ export interface MasonTuiStyle extends RenderStyle {
   tabBar?: (text: string) => string;
   tab?: (text: string) => string;
   activeTab?: (text: string) => string;
+  tabSeparator?: (text: string) => string;
   stateLine?: (text: string) => string;
   divider?: (text: string) => string;
   edit?: (text: string) => string;
@@ -69,6 +70,12 @@ export interface MasonTuiStyle extends RenderStyle {
   popupBorder?: (text: string) => string;
   popupTitle?: (text: string) => string;
   popupBody?: (text: string) => string;
+  detailLabel?: (text: string) => string;
+  detailValue?: (text: string) => string;
+  detailName?: (text: string) => string;
+  detailStatus?: (text: string) => string;
+  detailActionKey?: (text: string) => string;
+  detailAction?: (text: string) => string;
 }
 
 export interface MasonTui {
@@ -81,18 +88,18 @@ export interface MasonTui {
   update(packages?: string[]): Promise<MasonTuiState>;
   doctor(): Promise<MasonTuiState>;
   runCurrent(): Promise<MasonTuiState>;
-  handleInput(key: string): Promise<"close" | void>;
+  handleInput(...keys: unknown[]): Promise<"close" | void>;
   render(): string;
   renderLines(width: number, style?: MasonTuiStyle): string[];
 }
 
-export const MASON_TUI_COMMANDS: readonly MasonTuiCommand[] = [
+const MASON_TUI_COMMAND_DEFINITIONS: readonly MasonTuiCommand[] = [
   { id: "search", label: "search", inputLabel: "query" },
   { id: "list", label: "list" },
   { id: "installed", label: "installed" },
   { id: "install", label: "install", inputLabel: "packages" },
   { id: "uninstall", label: "uninstall", inputLabel: "packages" },
-  { id: "update", label: "update", inputLabel: "packages" },
+  { id: "update", label: "check update" },
   { id: "which", label: "which", inputLabel: "executable" },
   { id: "refresh", label: "refresh" },
   { id: "doctor", label: "doctor" },
@@ -100,9 +107,13 @@ export const MASON_TUI_COMMANDS: readonly MasonTuiCommand[] = [
   { id: "bin-dir", label: "bin-dir" },
 ];
 
+const HIDDEN_TUI_COMMANDS = new Set<MasonTuiCommandId>(["search", "install", "uninstall", "which", "env", "bin-dir"]);
+export const MASON_TUI_COMMANDS: readonly MasonTuiCommand[] = MASON_TUI_COMMAND_DEFINITIONS.filter((command) => !HIDDEN_TUI_COMMANDS.has(command.id));
+
 const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 const PANEL_MAX_ROWS = 18;
 const PANEL_DISPLAY_MIN_LINES = PANEL_MAX_ROWS + 4;
+const TAB_SEPARATOR = "  ╱  ";
 
 export function createMasonTui(host: MasonTuiHost): MasonTui {
   const state: MasonTuiState = {
@@ -218,25 +229,31 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
         return state;
       }
     },
-    async handleInput(key: string) {
+    async handleInput(...rawKeys: unknown[]) {
+      const key = normalizeInputKey(...rawKeys);
+      if (key.length === 0) return;
       if (state.edit) {
         await handleEditKey(state, key, () => tui.runCurrent());
         syncActiveRows(state);
         return;
       }
+      if (state.view === "detail" && (isBackKey(key) || isQuitKey(key))) {
+        state.view = "list";
+        return;
+      }
       if (isQuitKey(key)) return "close";
       if (isNextCommandKey(key)) {
         selectCommand(state, state.commandIndex + 1);
-        await tui.runCurrent();
+        await runSelectedCommand(tui, state);
         return;
       }
       if (isPreviousCommandKey(key)) {
         selectCommand(state, state.commandIndex - 1);
-        await tui.runCurrent();
+        await runSelectedCommand(tui, state);
         return;
       }
-      if (state.view === "detail" && isBackKey(key)) {
-        state.view = "list";
+      if (state.command === "refresh" && isRefreshKey(key)) {
+        await tui.runCurrent();
         return;
       }
       if (isPackageActionKey(key)) {
@@ -244,11 +261,11 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
         return;
       }
       if (state.view === "detail") return;
-      if (key === "/") {
-        state.edit = { kind: "filter", draft: state.filter };
+      if (key === "/" && state.model.kind === "table") {
+        state.edit = { kind: "name", draft: state.filter };
         return;
       }
-      if ((key === "l" || key === "L") && state.command === "search") {
+      if ((key === "l" || key === "L") && canFilterByLanguage(state)) {
         state.edit = { kind: "language", draft: state.language ?? "" };
         return;
       }
@@ -329,19 +346,19 @@ function buildInvocation(state: MasonTuiState): MasonTuiInvocation {
       return { argv: ["list", "--installed"], resultKind: "installed", title: "mason installed" };
     case "install": {
       const packages = splitInput(state.inputs.install);
-      if (packages.length === 0) throw new MasonCommandInputError("install requires package names. Press e to enter packages.");
+      if (packages.length === 0) throw new MasonCommandInputError(`install requires package names. ${shortcutText([["[e]", "enter packages"]])}`);
       return { argv: ["install", ...packages], resultKind: "install", title: "mason install", syncAfterPackageChange: true };
     }
     case "uninstall": {
       const packages = splitInput(state.inputs.uninstall);
-      if (packages.length === 0) throw new MasonCommandInputError("uninstall requires package names. Press e to enter packages.");
+      if (packages.length === 0) throw new MasonCommandInputError(`uninstall requires package names. ${shortcutText([["[e]", "enter packages"]])}`);
       return { argv: ["uninstall", ...packages], resultKind: "uninstall", title: "mason uninstall", syncAfterPackageChange: true };
     }
     case "update":
-      return { argv: ["update", ...splitInput(state.inputs.update)], resultKind: "install", title: "mason update", syncAfterPackageChange: true };
+      return { argv: ["list", "--outdated"], resultKind: "packages", title: "mason check update" };
     case "which": {
       const executable = splitInput(state.inputs.which);
-      if (executable.length !== 1) throw new MasonCommandInputError("which requires one executable. Press e to enter it.");
+        if (executable.length !== 1) throw new MasonCommandInputError(`which requires one executable. ${shortcutText([["[e]", "enter executable"]])}`);
       return { argv: ["which", executable[0]!], resultKind: "which", title: `mason which ${executable[0]!}` };
     }
     case "refresh":
@@ -356,6 +373,25 @@ function buildInvocation(state: MasonTuiState): MasonTuiInvocation {
     case "bin-dir":
       return { argv: ["bin-dir"], resultKind: "bin-dir", title: "mason bin-dir" };
   }
+}
+
+async function runSelectedCommand(tui: MasonTui, state: MasonTuiState): Promise<MasonTuiState> {
+  if (state.command === "refresh") {
+    showRefreshPrompt(state);
+    return state;
+  }
+  return tui.runCurrent();
+}
+
+function showRefreshPrompt(state: MasonTuiState): void {
+  state.view = "list";
+  state.loading = false;
+  state.edit = undefined;
+  state.notice = undefined;
+  state.model = { kind: "summary", title: "mason refresh", lines: [shortcutText([["[r]", "refresh registry"]])] };
+  state.tableItems = [];
+  state.lastTableKind = undefined;
+  syncActiveRows(state);
 }
 
 function buildSearchInvocation(state: MasonTuiState): MasonTuiInvocation {
@@ -379,10 +415,10 @@ export function renderMasonTuiLines(state: MasonTuiState, width: number, style: 
     styleLine("─".repeat(safeWidth), style.divider),
   ];
   if (state.edit) lines.push(styleLine(fitToWidth(`${state.edit.kind}> ${state.edit.draft}`, safeWidth), style.edit));
-  if (state.notice) lines.push(styleLine(fitToWidth(state.notice, safeWidth), style.notice));
+  if (state.notice) lines.push(renderInlineShortcutText(state.notice, safeWidth, style, style.notice));
   const displayLines = renderCurrentDisplay(state, safeWidth, style);
   lines.push(...padDisplayLines(displayLines, safeWidth, PANEL_DISPLAY_MIN_LINES));
-  lines.push(styleLine(fitToWidth("Keys: Tab/←/→ tabs  ↑/↓ select  Enter detail/run  i install  u update  r uninstall  / filter  e edit  q close", safeWidth), style.help));
+  lines.push(keyHelp(state, safeWidth, style));
   const fitted = lines.map((line) => fitToWidth(line, safeWidth));
   return state.view === "detail" ? renderDetailPopup(state, fitted, safeWidth, style) : fitted;
 }
@@ -394,43 +430,53 @@ function padDisplayLines(lines: string[], width: number, minLines: number): stri
 }
 
 function renderCurrentDisplay(state: MasonTuiState, width: number, style: MasonTuiStyle): string[] {
-  const baseOptions: RenderOptions = { width, filter: state.filter, scroll: state.scroll, maxRows: PANEL_MAX_ROWS, fixedHeight: true, style };
+  const baseOptions: RenderOptions = {
+    width,
+    filterSummary: tableFilterSummary(state),
+    filterActions: tableFilterActions(state),
+    totalRows: state.model.kind === "table" ? state.model.rows.length : undefined,
+    scroll: state.scroll,
+    maxRows: PANEL_MAX_ROWS,
+    fixedHeight: true,
+    style,
+  };
   if (state.model.kind === "table" && state.activeRows.length > 0) {
-    return renderDisplay(state.model, { ...baseOptions, selectedRow: state.selectedIndex });
+    return renderDisplay(filteredTableModel(state), { ...baseOptions, selectedRow: state.selectedIndex });
   }
+  if (state.model.kind === "table") return renderDisplay(filteredTableModel(state), baseOptions);
   return renderDisplay(state.model, baseOptions);
 }
 
-function renderDetailContentLines(state: MasonTuiState, width: number): string[] {
+function renderDetailContentLines(state: MasonTuiState, width: number, style: MasonTuiStyle): string[] {
   const selected = selectedEntry(state);
   if (!selected) return [fitToWidth("No package selected.", width)];
   const item = recordValue(selected.item);
   const row = selected.row;
   const name = selectedPackageName(state) || "<unknown>";
-  const lines = [fitToWidth(`Package: ${name}`, width)];
+  const lines = [detailFieldLine(width, "Package", name, style, style.detailName)];
   if (item) {
-    pushDetail(lines, width, "Status", packageStatusForDetail(state, item));
-    pushDetail(lines, width, "Version", stringValue(item.version) || "-");
-    pushDetail(lines, width, "Installed", stringValue(item.installed_version) || (isInstalledPackage(state, item) ? "yes" : "no"));
-    pushDetail(lines, width, "Languages", stringList(item.languages) || "-");
-    pushDetail(lines, width, "Categories", stringList(item.categories) || "-");
-    pushDetail(lines, width, "Description", stringValue(item.description) || "-");
-    pushDetail(lines, width, "Neovim lspconfig", stringValue(item.neovim_lspconfig) || "-");
-    pushDetail(lines, width, "Bins", keyList(item.bins) || "-");
-    pushDetail(lines, width, "Installed at", stringValue(item.installed_at) || "-");
-    pushDetail(lines, width, "Source", stringValue(item.source_id) || "-");
-    pushDetail(lines, width, "Package dir", stringValue(item.package_dir) || "-");
+    pushDetail(lines, width, "Status", packageStatusForDetail(state, item), style, style.detailStatus);
+    pushDetail(lines, width, "Version", stringValue(item.version) || "-", style);
+    pushDetail(lines, width, "Installed", stringValue(item.installed_version) || (isInstalledPackage(state, item) ? "yes" : "no"), style);
+    pushDetail(lines, width, "Languages", stringList(item.languages) || "-", style);
+    pushDetail(lines, width, "Categories", stringList(item.categories) || "-", style);
+    pushDetail(lines, width, "Description", stringValue(item.description) || "-", style);
+    pushDetail(lines, width, "Neovim lspconfig", stringValue(item.neovim_lspconfig) || "-", style);
+    pushDetail(lines, width, "Bins", keyList(item.bins) || "-", style);
+    pushDetail(lines, width, "Installed at", stringValue(item.installed_at) || "-", style);
+    pushDetail(lines, width, "Source", stringValue(item.source_id) || "-", style);
+    pushDetail(lines, width, "Package dir", stringValue(item.package_dir) || "-", style);
   } else {
-    for (let index = 0; index < row.length; index += 1) pushDetail(lines, width, `Column ${index + 1}`, row[index] ?? "-");
+    for (let index = 0; index < row.length; index += 1) pushDetail(lines, width, `Column ${index + 1}`, row[index] ?? "-", style);
   }
-  lines.push(fitToWidth("Actions: i install  u update  r uninstall  Esc/Backspace back", width));
+  pushActionLines(lines, width, style);
   return lines;
 }
 
 function renderDetailPopup(state: MasonTuiState, baseLines: string[], width: number, style: MasonTuiStyle): string[] {
   const popupWidth = clamp(Math.floor(width * 0.72), Math.min(44, width), Math.max(1, width - 4));
   const contentWidth = Math.max(1, popupWidth - 4);
-  const contentLines = renderDetailContentLines(state, contentWidth);
+  const contentLines = renderDetailContentLines(state, contentWidth, style);
   const title = " package details ";
   const topBorder = `╭${title}${"─".repeat(Math.max(0, popupWidth - title.length - 2))}╮`;
   const bottomBorder = `╰${"─".repeat(Math.max(0, popupWidth - 2))}╯`;
@@ -453,9 +499,48 @@ function renderDetailPopup(state: MasonTuiState, baseLines: string[], width: num
   return result.map((line) => fitToWidth(line, width));
 }
 
-function pushDetail(lines: string[], width: number, label: string, value: string): void {
+function pushDetail(lines: string[], width: number, label: string, value: string, style: MasonTuiStyle, valueStyler: ((text: string) => string) | undefined = style.detailValue): void {
   if (value === "-") return;
-  lines.push(fitToWidth(`${label}: ${value}`, width));
+  lines.push(detailFieldLine(width, label, value, style, valueStyler));
+}
+
+function detailFieldLine(width: number, label: string, value: string, style: MasonTuiStyle, valueStyler: ((text: string) => string) | undefined = style.detailValue): string {
+  const labelText = `${label}: `;
+  const valueWidth = Math.max(1, width - labelText.length);
+  const renderedValue = truncateToWidth(value, valueWidth);
+  return fitToWidth(`${styleLine(labelText, style.detailLabel)}${styleLine(renderedValue, valueStyler)}`, width);
+}
+
+function pushActionLines(lines: string[], width: number, style: MasonTuiStyle): void {
+  const actions = [
+    ["[i]", "install"],
+    ["[u]", "update"],
+    ["[r]", "uninstall"],
+    ["[q]/[Esc]", "back"],
+  ] as const;
+  const current: typeof actions[number][] = [];
+  let currentLength = 0;
+  for (const action of actions) {
+    const partLength = action[0].length + 2 + action[1].length;
+    const nextLength = current.length === 0 ? partLength : currentLength + 2 + partLength;
+    if (current.length > 0 && nextLength > width) {
+      lines.push(detailActionLine(current, width, style));
+      current.length = 0;
+      currentLength = 0;
+    }
+    current.push(action);
+    currentLength = currentLength === 0 ? partLength : currentLength + 2 + partLength;
+  }
+  if (current.length > 0) lines.push(detailActionLine(current, width, style));
+}
+
+function detailActionLine(actions: readonly (readonly [string, string])[], width: number, style: MasonTuiStyle): string {
+  const parts: string[] = [];
+  for (const [key, label] of actions) {
+    if (parts.length > 0) parts.push("  ");
+    parts.push(styleLine(key, style.detailActionKey), styleLine(": ", style.detailAction), styleLine(label, style.detailAction));
+  }
+  return fitToWidth(parts.join(""), width);
 }
 
 function renderCommandTabs(state: MasonTuiState, width: number, style: MasonTuiStyle): string {
@@ -463,15 +548,22 @@ function renderCommandTabs(state: MasonTuiState, width: number, style: MasonTuiS
   let used = 0;
   for (let index = 0; index < MASON_TUI_COMMANDS.length && used < width; index += 1) {
     const command = MASON_TUI_COMMANDS[index]!;
+    if (index > 0 && !pushTabPart(parts, TAB_SEPARATOR, width, used, style.tabSeparator)) break;
+    if (index > 0) used += Math.min(TAB_SEPARATOR.length, width - used);
     const text = index === state.commandIndex ? `[${command.label}]` : ` ${command.label} `;
-    const segment = `${index === 0 ? "" : " "}${text}`;
-    const clipped = segment.length > width - used ? truncateToWidth(segment, width - used) : segment;
-    parts.push(styleLine(clipped, index === state.commandIndex ? style.activeTab : style.tab));
-    used += clipped.length;
-    if (clipped.length < segment.length) break;
+    if (!pushTabPart(parts, text, width, used, index === state.commandIndex ? style.activeTab : style.tab)) break;
+    used += Math.min(text.length, width - used);
   }
   const tabs = parts.join("");
   return styleLine(fitToWidth(tabs, width), style.tabBar);
+}
+
+function pushTabPart(parts: string[], text: string, width: number, used: number, styler: ((text: string) => string) | undefined): boolean {
+  const remaining = width - used;
+  if (remaining <= 0) return false;
+  const clipped = text.length > remaining ? truncateToWidth(text, remaining) : text;
+  parts.push(styleLine(clipped, styler));
+  return clipped.length === text.length;
 }
 
 function renderStateLine(state: MasonTuiState): string {
@@ -481,8 +573,8 @@ function renderStateLine(state: MasonTuiState): string {
     const value = state.inputs[state.command];
     parts.push(`${command.inputLabel}=${value.length > 0 ? value : "-"}`);
   }
-  if (state.command === "search") parts.push(`language=${state.language && state.language.length > 0 ? state.language : "-"}`);
-  if (state.filter.length > 0) parts.push(`filter=${state.filter}`);
+  if (state.language && state.language.length > 0) parts.push(`language=${state.language}`);
+  if (state.filter.length > 0) parts.push(`name=${state.filter}`);
   if (state.model.kind === "table") parts.push(`selected=${state.activeRows.length > 0 ? state.selectedIndex + 1 : 0}/${state.activeRows.length}`);
   if (state.loading) parts.push("loading");
   return parts.join("  ");
@@ -507,9 +599,14 @@ function syncActiveRows(state: MasonTuiState): void {
     state.selectedIndex = 0;
     return;
   }
-  const filter = state.filter.trim().toLocaleLowerCase();
+  const nameFilter = state.filter.trim().toLocaleLowerCase();
+  const languageFilter = (state.language ?? "").trim().toLocaleLowerCase();
   const entries = state.model.rows.map((row, index) => ({ row, item: state.tableItems[index] }));
-  const filtered = filter.length === 0 ? entries : entries.filter((entry) => entry.row.join(" ").toLocaleLowerCase().includes(filter));
+  const filtered = entries.filter((entry) => {
+    if (nameFilter.length > 0 && !packageNameFromItemOrRow(entry.item, entry.row)?.toLocaleLowerCase().includes(nameFilter)) return false;
+    if (languageFilter.length > 0 && !languagesFromItemOrRow(entry.item, entry.row).toLocaleLowerCase().includes(languageFilter)) return false;
+    return true;
+  });
   state.activeRows = filtered.map((entry) => entry.row);
   state.activeItems = filtered.map((entry) => entry.item);
   if (state.selectedPackage !== undefined) {
@@ -552,7 +649,7 @@ async function handleEditKey(state: MasonTuiState, key: string, runCurrent: () =
   if (!edit) return;
   if (isEnterKey(key)) {
     const draft = edit.draft.trim();
-    if (edit.kind === "filter") {
+    if (edit.kind === "name") {
       state.filter = draft;
       state.scroll = 0;
       state.selectedIndex = 0;
@@ -568,7 +665,7 @@ async function handleEditKey(state: MasonTuiState, key: string, runCurrent: () =
       state.selectedPackage = undefined;
       state.view = "list";
       state.edit = undefined;
-      return runCurrent();
+      return;
     }
     state.inputs[state.command] = draft;
     if (state.command === "search") state.query = draft;
@@ -602,7 +699,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
   const installed = isInstalledPackage(state, item);
   if (key === "i" || key === "I") {
     if (installed) {
-      setNotice(state, host, `${name} is already installed. Press u to update.`, "error");
+      setNotice(state, host, `${name} is already installed. ${shortcutText([["[u]", "update"]])}`, "error");
       return;
     }
     await runPackageCommand(state, host, ["install", name], name, "Installed");
@@ -610,7 +707,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
   }
   if (key === "u" || key === "U") {
     if (!installed) {
-      setNotice(state, host, `${name} is not installed. Press i to install.`, "error");
+      setNotice(state, host, `${name} is not installed. ${shortcutText([["[i]", "install"]])}`, "error");
       return;
     }
     await runPackageCommand(state, host, ["update", name], name, "Updated");
@@ -644,7 +741,7 @@ async function runPackageCommand(state: MasonTuiState, host: MasonTuiHost, argv:
 
 async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string): Promise<void> {
   state.selectedPackage = packageName;
-  if (state.command === "search" || state.command === "list" || state.command === "installed") {
+  if (state.command === "search" || state.command === "list" || state.command === "installed" || state.command === "update") {
     const planned = buildInvocation(state);
     state.model = { kind: "summary", title: planned.title, lines: ["Loading..."] };
     const data = await host.runCli(planned.argv);
@@ -676,10 +773,11 @@ function selectCommand(state: MasonTuiState, nextIndex: number): void {
   state.command = MASON_TUI_COMMANDS[state.commandIndex]!.id;
   state.view = "list";
   resetSelection(state);
+  state.language = undefined;
 }
 
 function currentCommand(state: MasonTuiState): MasonTuiCommand {
-  return MASON_TUI_COMMANDS[state.commandIndex]!;
+  return MASON_TUI_COMMAND_DEFINITIONS.find((command) => command.id === state.command) ?? MASON_TUI_COMMANDS[state.commandIndex]!;
 }
 
 function commandIndex(command: MasonTuiCommandId): number {
@@ -718,6 +816,64 @@ function packageNameFromItemOrRow(item: unknown, row: readonly string[]): string
   return firstCell && firstCell.length > 0 ? firstCell : undefined;
 }
 
+function languagesFromItemOrRow(item: unknown, row: readonly string[]): string {
+  const value = recordValue(item);
+  const languages = value ? stringList(value.languages) : "";
+  if (languages.length > 0) return languages;
+  const languagesColumn = row[4];
+  return languagesColumn && languagesColumn.length > 0 ? languagesColumn : "";
+}
+
+function filteredTableModel(state: MasonTuiState): DisplayModel {
+  if (state.model.kind !== "table") return state.model;
+  return {
+    ...state.model,
+    rows: state.activeRows,
+  };
+}
+
+function tableFilterSummary(state: MasonTuiState): string | undefined {
+  const filterParts: string[] = [];
+  if (state.filter.trim().length > 0) filterParts.push(`name: ${state.filter.trim()}`);
+  if (state.language && state.language.trim().length > 0) filterParts.push(`language: ${state.language.trim()}`);
+  return filterParts.length > 0 ? filterParts.join("  ") : undefined;
+}
+
+function keyHelp(state: MasonTuiState, width: number, style: MasonTuiStyle): string {
+  return renderShortcutLine("Keys:", keyHelpActions(state), width, style);
+}
+
+function keyHelpActions(state: MasonTuiState): ShortcutAction[] {
+  const actions: ShortcutAction[] = [["[Tab]/[→]", "next tab"], ["[Shift-Tab]/[←]", "previous tab"]];
+  if (state.command === "refresh") {
+    actions.push(["[r]", "refresh registry"], ["[q]/[Esc]", "close"]);
+    return actions;
+  }
+  if (state.model.kind === "table") {
+    actions.push(
+      ["[↑]/[↓]", "select"],
+      ["[Enter]", "detail"],
+      ["[i]", "install"],
+      ["[u]", "update"],
+      ["[r]", "uninstall"],
+      ...tableFilterActions(state),
+    );
+  } else {
+    actions.push(["[Enter]", "run"]);
+  }
+  if (currentCommand(state).inputLabel) actions.push(["[e]", "edit"]);
+  actions.push(["[q]/[Esc]", "close"]);
+  return actions;
+}
+
+function tableFilterActions(state: MasonTuiState): ShortcutAction[] {
+  return canFilterByLanguage(state) ? [["[/]", "name"], ["[l]", "language"]] : [["[/]", "name"]];
+}
+
+function canFilterByLanguage(state: MasonTuiState): boolean {
+  return state.model.kind === "table" && state.model.columns.some((column) => column.label === "Languages");
+}
+
 function isInstalledPackage(state: MasonTuiState, item: Record<string, unknown> | undefined): boolean {
   if (state.command === "installed") return true;
   if (!item) return false;
@@ -734,15 +890,19 @@ function packageStatusForDetail(state: MasonTuiState, item: Record<string, unkno
 }
 
 function isPackageActionKey(key: string): boolean {
-  return key === "i" || key === "I" || key === "u" || key === "U" || key === "r" || key === "R";
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "i" || normalized === "u" || normalized === "r";
 }
 
 function isQuitKey(key: string): boolean {
-  return key === "q" || key === "\x03" || key === "ctrl+c" || key === "ctrl-c";
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "q" || key === "\x03" || normalized === "ctrl+c" || normalized === "ctrl-c";
 }
 
 function isBackKey(key: string): boolean {
-  return key === "\x1b" || key === "escape" || key === "esc" || key === "backspace" || key === "\b" || key === "\x7f";
+  if (isEscapeKey(key) || key === "\b" || key === "\x7f") return true;
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "escape" || normalized === "esc" || normalized === "backspace";
 }
 
 function isEnterKey(key: string): boolean {
@@ -750,27 +910,118 @@ function isEnterKey(key: string): boolean {
 }
 
 function isNextCommandKey(key: string): boolean {
-  return key === "tab" || key === "\t" || key === "right" || key === "\x1b[C";
+  if (isPlainTabKey(key) || key === "\x1b[C") return true;
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "tab" || normalized === "right" || normalized === "arrowright";
 }
 
 function isPreviousCommandKey(key: string): boolean {
-  return key === "shift+tab" || key === "backtab" || key === "\x1b[Z" || key === "left" || key === "\x1b[D";
+  if (isShiftTabKey(key) || key === "\x1b[D") return true;
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "shift+tab" || normalized === "shift-tab" || normalized === "shift_tab" || normalized === "shifttab" || normalized === "backtab" || normalized === "back-tab" || normalized === "back_tab" || normalized === "s-tab" || normalized === "s+tab" || normalized === "left" || normalized === "arrowleft";
+}
+
+function isRefreshKey(key: string): boolean {
+  return key.toLocaleLowerCase() === "r";
 }
 
 function isScrollDownKey(key: string): boolean {
-  return key === "down" || key === "j" || key === "\x1b[B";
+  if (key === "\x1b[B") return true;
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "down" || normalized === "arrowdown" || normalized === "j";
 }
 
 function isScrollUpKey(key: string): boolean {
-  return key === "up" || key === "k" || key === "\x1b[A";
+  if (key === "\x1b[A") return true;
+  const normalized = key.toLocaleLowerCase();
+  return normalized === "up" || normalized === "arrowup" || normalized === "k";
 }
 
 function isPageDownKey(key: string): boolean {
-  return key === "pagedown" || key === "\x1b[6~";
+  return key.toLocaleLowerCase() === "pagedown" || key === "\x1b[6~";
 }
 
 function isPageUpKey(key: string): boolean {
-  return key === "pageup" || key === "\x1b[5~";
+  return key.toLocaleLowerCase() === "pageup" || key === "\x1b[5~";
+}
+
+function normalizeInputKey(...inputs: unknown[]): string {
+  const candidates = inputs.flatMap(inputKeyCandidates);
+  const shiftedTab = candidates.find((key) => isPreviousCommandKey(key) && !isNextCommandKey(key));
+  if (shiftedTab) return shiftedTab;
+  return candidates[0] ?? "";
+}
+
+function inputKeyCandidates(input: unknown): string[] {
+  if (typeof input === "string") {
+    const normalized = normalizeKeyString(input);
+    return normalized.length > 0 ? [normalized] : [];
+  }
+  const record = recordValue(input);
+  if (!record) return [];
+  const candidates: string[] = [];
+  const name = stringValue(record.name) || stringValue(record.key) || stringValue(record.code);
+  const sequence = stringValue(record.sequence) || stringValue(record.input);
+  const normalizedSequence = sequence.length > 0 ? normalizeKeyString(sequence) : "";
+  if (normalizedSequence.length > 0) candidates.push(normalizedSequence);
+  if (name.length > 0) {
+    const normalized = normalizeKeyString(name);
+    const shifted = record.shift === true || record.shiftKey === true;
+    if (shifted && (normalized === "tab" || normalized === "\t")) {
+      candidates.unshift("shift-tab");
+    } else {
+      candidates.push(normalized);
+    }
+  }
+  return candidates.filter((candidate) => candidate.length > 0);
+}
+
+function normalizeKeyString(key: string): string {
+  if (key.length === 1 || key.startsWith("\x1b")) return key;
+  const normalized = key.toLocaleLowerCase();
+  if (normalized === "escape") return "escape";
+  if (normalized === "arrowleft") return "left";
+  if (normalized === "arrowright") return "right";
+  if (normalized === "arrowup") return "up";
+  if (normalized === "arrowdown") return "down";
+  if (normalized === "return") return "enter";
+  return normalized;
+}
+
+function isEscapeKey(data: string): boolean {
+  return data === "\x1b" || matchesTerminalKey(data, 27, 0);
+}
+
+function isPlainTabKey(data: string): boolean {
+  return data === "\t" || matchesTerminalKey(data, 9, 0);
+}
+
+function isShiftTabKey(data: string): boolean {
+  return data === "\x1b[Z" || matchesTerminalKey(data, 9, 1);
+}
+
+function matchesTerminalKey(data: string, expectedCodepoint: number, expectedModifier: number): boolean {
+  return matchesCsiUKey(data, expectedCodepoint, expectedModifier) || matchesModifyOtherKeys(data, expectedCodepoint, expectedModifier);
+}
+
+function matchesCsiUKey(data: string, expectedCodepoint: number, expectedModifier: number): boolean {
+  const match = data.match(/^\x1b\[(\d+)(?::\d*)?(?::\d+)?(?:;(\d+))?(?::\d+)?u$/);
+  if (!match) return false;
+  const codepoint = Number.parseInt(match[1]!, 10);
+  const modifier = match[2] ? Number.parseInt(match[2], 10) - 1 : 0;
+  return codepoint === expectedCodepoint && stripLockModifiers(modifier) === expectedModifier;
+}
+
+function matchesModifyOtherKeys(data: string, expectedCodepoint: number, expectedModifier: number): boolean {
+  const match = data.match(/^\x1b\[27;(\d+);(\d+)~$/);
+  if (!match) return false;
+  const modifier = Number.parseInt(match[1]!, 10) - 1;
+  const codepoint = Number.parseInt(match[2]!, 10);
+  return codepoint === expectedCodepoint && stripLockModifiers(modifier) === expectedModifier;
+}
+
+function stripLockModifiers(modifier: number): number {
+  return modifier & ~(64 + 128);
 }
 
 function normalizeWidth(width: number): number {
