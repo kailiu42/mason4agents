@@ -51,10 +51,13 @@ export type MasonResultKind =
 export interface RenderOptions {
   width: number;
   filter?: string;
+  filterSummary?: string | undefined;
+  filterActions?: readonly ShortcutAction[] | undefined;
   scroll?: number;
   maxRows?: number;
   selectedRow?: number;
   fixedHeight?: boolean;
+  totalRows?: number | undefined;
   style?: RenderStyle;
 }
 
@@ -64,7 +67,11 @@ export interface RenderStyle {
   tableSeparator?: (text: string) => string;
   selectedRow?: (text: string) => string;
   help?: (text: string) => string;
+  shortcutKey?: (text: string) => string;
+  shortcutAction?: (text: string) => string;
 }
+
+export type ShortcutAction = readonly [key: string, action: string];
 
 const TABLE_SEPARATOR = "  ";
 const DEFAULT_MAX_ROWS = 24;
@@ -88,7 +95,7 @@ export function usageDisplay(): UsageDisplay {
       "/mason env --shell bash|zsh|fish|powershell|cmd|json",
       "/mason doctor",
       "",
-      "Table views: use / to filter, ↑/↓ or PgUp/PgDn to scroll, q or Esc to close.",
+      `Table views: ${shortcutText([["[/]", "filter"], ["[↑]/[↓]/[PgUp]/[PgDn]", "scroll"], ["[q]/[Esc]", "close"]])}`,
     ],
   };
 }
@@ -126,12 +133,12 @@ export function renderDisplay(model: DisplayModel, options: RenderOptions): stri
     case "table":
       return renderTableDisplay(model, width, options);
     case "summary":
-      return renderTextDisplay(model.title, model.lines, width);
+      return renderTextDisplay(model.title, model.lines, width, options.style);
     case "usage":
-      return renderTextDisplay(model.title, model.lines, width);
+      return renderTextDisplay(model.title, model.lines, width, options.style);
     case "error": {
       const lines = [`Error: ${model.message}`, ...(model.lines ?? [])];
-      return renderTextDisplay(model.title, lines, width);
+      return renderTextDisplay(model.title, lines, width, options.style);
     }
   }
 }
@@ -355,8 +362,10 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
   const hasSelection = selectedRow !== undefined;
   const rowPrefixWidth = hasSelection ? 2 : 0;
   const tableWidth = Math.max(1, width - rowPrefixWidth);
-  const titleParts = [`${model.title} — ${filteredRows.length}/${model.rows.length}`];
+  const totalRows = options.totalRows ?? model.rows.length;
+  const titleParts = [`${model.title} — ${filteredRows.length}/${totalRows}`];
   if (filter.length > 0) titleParts.push(`filter: ${filter}`);
+  if (options.filterSummary && options.filterSummary.length > 0) titleParts.push(options.filterSummary);
   const titleLine = truncateToWidth(titleParts.join("  "), width);
   const lines = [style?.tableTitle ? style.tableTitle(fitPlainToWidth(titleLine, width)) : titleLine];
   if (model.subtitle && model.subtitle.length > 0) lines.push(truncateToWidth(model.subtitle, width));
@@ -412,10 +421,13 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
   }
   lines.push(...bodyLines);
   const range = filteredRows.length === 0 ? "showing 0-0 of 0" : `showing ${renderedStart + 1}-${renderedEnd} of ${filteredRows.length}`;
-  const navigation = hasSelection ? "↑↓ select  Enter detail" : "↑↓ scroll";
-  const help = model.searchable ? `${range}  / filter  ${navigation}  q close` : `${range}  ${navigation}  q close`;
-  const helpLine = truncateToWidth(help, width);
-  lines.push(style?.help ? style.help(fitPlainToWidth(helpLine, width)) : helpLine);
+  const navigationActions: ShortcutAction[] = hasSelection ? [["[↑]/[↓]", "select"], ["[Enter]", "detail"]] : [["[↑]/[↓]", "scroll"]];
+  const helpActions: ShortcutAction[] = [
+    ...(model.searchable ? options.filterActions ?? [["[/]", "filter"]] : []),
+    ...navigationActions,
+    ["[q]/[Esc]", "close"],
+  ];
+  lines.push(renderShortcutLine(range, helpActions, width, style));
   if (model.footer) {
     for (const line of model.footer) lines.push(truncateToWidth(line, width));
   }
@@ -442,10 +454,72 @@ function formatPrefixedTableLine(line: string, prefix: string, hasSelection: boo
   return truncateToWidth(`${prefix}${line}`, width);
 }
 
-function renderTextDisplay(title: string, textLines: readonly string[], width: number): string[] {
+function renderTextDisplay(title: string, textLines: readonly string[], width: number, style?: RenderStyle): string[] {
   const lines = [truncateToWidth(title, width)];
-  for (const line of textLines) lines.push(truncateToWidth(line, width));
+  for (const line of textLines) lines.push(renderInlineShortcutText(line, width, style));
   return lines;
+}
+
+export function shortcutText(actions: readonly ShortcutAction[]): string {
+  return actions.map(([key, action]) => `${key}: ${action}`).join("  ");
+}
+
+export function renderShortcutLine(prefix: string, actions: readonly ShortcutAction[], width: number, style?: RenderStyle): string {
+  const segments: StyledSegment[] = [];
+  if (prefix.length > 0) segments.push({ text: prefix, styler: style?.help });
+  for (let index = 0; index < actions.length; index += 1) {
+    const [key, action] = actions[index]!;
+    if (index > 0 || prefix.length > 0) segments.push({ text: "  ", styler: style?.help });
+    segments.push(
+      { text: key, styler: style?.shortcutKey },
+      { text: ": ", styler: style?.shortcutAction },
+      { text: action, styler: style?.shortcutAction },
+    );
+  }
+  return renderStyledSegments(segments, width, style?.help, true);
+}
+
+export function renderInlineShortcutText(text: string, width: number, style?: RenderStyle, plainStyler = style?.help): string {
+  const segments: StyledSegment[] = [];
+  const pattern = /(\[[^\]]+\](?:\/\[[^\]]+\])?): ([^[]+)/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const [matched, key, action] = match;
+    if (match.index > cursor) segments.push({ text: text.slice(cursor, match.index), styler: plainStyler });
+    segments.push(
+      { text: key!, styler: style?.shortcutKey },
+      { text: ": ", styler: style?.shortcutAction },
+      { text: action!, styler: style?.shortcutAction },
+    );
+    cursor = match.index + matched.length;
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), styler: plainStyler });
+  if (segments.length === 0) segments.push({ text, styler: plainStyler });
+  return renderStyledSegments(segments, width, plainStyler, false);
+}
+
+interface StyledSegment {
+  text: string;
+  styler?: ((text: string) => string) | undefined;
+}
+
+function renderStyledSegments(segments: readonly StyledSegment[], width: number, padStyler: ((text: string) => string) | undefined, pad: boolean): string {
+  const parts: string[] = [];
+  let used = 0;
+  for (const segment of segments) {
+    if (used >= width) break;
+    const remaining = width - used;
+    const clipped = truncateToWidth(segment.text, remaining);
+    parts.push(segment.styler ? segment.styler(clipped) : clipped);
+    used += clipped.length;
+    if (clipped.length < segment.text.length) break;
+  }
+  if (pad && used < width) {
+    const padding = " ".repeat(width - used);
+    parts.push(padStyler ? padStyler(padding) : padding);
+  }
+  return parts.join("");
 }
 
 function filterTableRows(rows: readonly (readonly string[])[], filter: string): readonly (readonly string[])[] {
