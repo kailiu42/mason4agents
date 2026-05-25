@@ -85,6 +85,24 @@ function bridge() {
   return { bridge: fake, calls };
 }
 
+function fakeTheme() {
+  return {
+    fg(_token: string, text: string) {
+      return `\x1b[38;5;250m${text}\x1b[39m`;
+    },
+    bg(_token: string, text: string) {
+      return `\x1b[48;5;236m${text}\x1b[49m`;
+    },
+    bold(text: string) {
+      return `\x1b[1m${text}\x1b[22m`;
+    },
+  };
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 describe("Mason panel", () => {
   test("searches, renders tables, installs, uninstalls, updates, and doctors through bridge", async () => {
     const { bridge: fake, calls } = bridge();
@@ -151,12 +169,14 @@ describe("Mason panel", () => {
   test("renders custom UI as line arrays with bounded width", async () => {
     const { bridge: fake } = bridge();
     let component: { render(width: number): unknown; handleInput(key: string): void } | undefined;
+    let customOptions: unknown;
     let closed = false;
     const ctx = {
       hasUI: true,
       ui: {
-        custom(factory: Function) {
-          component = factory(undefined, undefined, undefined, () => { closed = true; });
+        custom(factory: Function, options: unknown) {
+          customOptions = options;
+          component = factory({ requestRender() {} }, fakeTheme(), undefined, () => { closed = true; });
         },
       },
     };
@@ -164,13 +184,21 @@ describe("Mason panel", () => {
     await openMasonPanel(ctx, fake);
     const lines = component?.render(24);
 
+    expect(customOptions).toMatchObject({
+      overlay: true,
+      overlayOptions: { width: "100%", maxHeight: "90%", anchor: "top-center" },
+    });
     expect(Array.isArray(lines)).toBe(true);
     expect((lines as string[]).join("\n")).toContain("[search]");
     expect((lines as string[]).join("\n")).toContain("stylua");
-    expect((lines as string[]).every((line) => line.length <= 24)).toBe(true);
+    expect((lines as string[]).every((line) => stripAnsi(line).length <= 24)).toBe(true);
     component?.handleInput("/");
     expect((component?.render(24) as string[]).join("\n")).toContain("filter>");
     component?.handleInput("escape");
+    component?.handleInput("enter");
+    expect((component?.render(48) as string[]).join("\n")).toContain("package details");
+    component?.handleInput("escape");
+    expect((component?.render(48) as string[]).join("\n")).not.toContain("package details");
     component?.handleInput("q");
     await Promise.resolve();
     expect(closed).toBe(true);
@@ -212,10 +240,16 @@ describe("Pi extension", () => {
       expect(tools).toContain("mason_install");
       expect(events).toEqual(["session_start"]);
       expect((process.env.PATH ?? "").startsWith(result.binDir)).toBe(true);
-      await handlers.mason?.("", { hasUI: false });
-      await handlers.mason?.("search stylua --language Lua", { hasUI: false });
-      await handlers["mason-doctor"]?.("", { hasUI: false });
+      const workingVisible: boolean[] = [];
+      const commandCtx = {
+        hasUI: false,
+        ui: { setWorkingVisible(value: boolean) { workingVisible.push(value); } },
+      };
+      await handlers.mason?.("", commandCtx);
+      await handlers.mason?.("search stylua --language Lua", commandCtx);
+      await handlers["mason-doctor"]?.("", commandCtx);
       expect(messages).toHaveLength(3);
+      expect(workingVisible).toEqual([false, true, false, true, false, true]);
       expect(messages[0]).toMatchObject({ customType: "mason4agents", display: true });
       expect(messages[1]).toMatchObject({ customType: "mason4agents", display: true });
       expect(String((messages[1] as { content?: unknown }).content)).toContain("stylua");

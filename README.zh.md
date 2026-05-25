@@ -102,7 +102,7 @@ mason4agents uninstall stylua
 /mason
 ```
 
-Panel 顶部展示命令 tabs（`search`、`list`、`installed`、`install`、`uninstall`、`update`、`which`、`refresh`、`doctor`、`env`、`bin-dir`），下方是格式化输出区域。表格视图会直接显示 installed 状态，并支持 `/` 本地过滤、`↑`/`↓` 滚动、`e` 编辑当前命令输入，以及 `l` 编辑 `search --language` 过滤器。
+Panel 会以匹配宿主宽度、跟随宿主 theme 的 TUI 打开，顶部展示命令 tabs（`search`、`list`、`installed`、`install`、`uninstall`、`update`、`which`、`refresh`、`doctor`、`env`、`bin-dir`），下方是自适应宽度的表格区域。表格视图会直接显示 installed 状态，保留整行高亮的当前选中行，并支持 `Tab`/`←`/`→` 切换命令、`/` 本地过滤、`↑`/`↓` 选择行、`Enter` 打开原位包详情弹窗、`i` 安装、`u` 更新、`r` 卸载、`e` 编辑当前命令输入，以及 `l` 编辑 `search --language` 过滤器。
 
 不需要打开 panel 时，可直接运行等价 CLI 的 slash 子命令：
 

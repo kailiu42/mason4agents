@@ -1,5 +1,8 @@
 import type { CliBridge, CliRunOptions } from "./cli";
+import { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
 import { errorDisplay, modelForResult, usageDisplay, type DisplayModel, type MasonResultKind } from "./mason-render";
+
+export { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
 
 export type MasonCommandName =
   | "refresh"
@@ -28,13 +31,6 @@ export interface ParsedMasonUsage {
 }
 
 export type ParsedMasonInput = ParsedMasonCommand | ParsedMasonUsage;
-
-export class MasonCommandInputError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MasonCommandInputError";
-  }
-}
 
 const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 
@@ -93,49 +89,6 @@ export function parseMasonCommandTokens(tokens: readonly string[]): ParsedMasonI
     default:
       throw new MasonCommandInputError(`Unknown /mason subcommand: ${command}`);
   }
-}
-
-export function tokenizeMasonArgs(input: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let escaped = false;
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index]!;
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) {
-        quote = undefined;
-      } else {
-        current += char;
-      }
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    if (isWhitespace(char)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += char;
-  }
-  if (escaped) current += "\\";
-  if (quote) throw new MasonCommandInputError("Unterminated quoted string.");
-  if (current.length > 0) tokens.push(current);
-  return tokens;
 }
 
 function parseRefresh(tokens: readonly string[]): ParsedMasonCommand {
@@ -379,10 +332,6 @@ function usageAsError(commandName: string): never {
 
 function isHelp(token: string): boolean {
   return token === "--help" || token === "-h";
-}
-
-function isWhitespace(char: string): boolean {
-  return char === " " || char === "\t" || char === "\n" || char === "\r";
 }
 
 function messageFromError(err: unknown): string {

@@ -20,6 +20,7 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
   const apiCtx = ctx;
   const cliBridge = bridge ?? createCliBridge(undefined, extensionStartUrl(ctx));
   registerCommand(ctx, "mason", "Open mason4agents package manager", async (args, commandCtx) => {
+    const restoreWorking = suppressLocalCommandWorking(commandCtx);
     try {
       const input = typeof args === "string" ? args.trim() : "";
       const shownInUi = canShowCustomUi(commandCtx);
@@ -38,15 +39,20 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
       publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason", err);
+    } finally {
+      restoreWorking();
     }
   });
 
   registerCommand(ctx, "mason-doctor", "Run mason4agents doctor", async (_args, commandCtx) => {
+    const restoreWorking = suppressLocalCommandWorking(commandCtx);
     try {
       const model = await executeMasonCommand("doctor", cliBridge);
       publishMessage(apiCtx, "mason4agents-doctor", renderDisplayText(model));
     } catch (err) {
       reportCommandError(commandCtx, apiCtx, "mason-doctor", err);
+    } finally {
+      restoreWorking();
     }
   });
 
@@ -89,6 +95,23 @@ function registerCommand(
 function canShowCustomUi(ctx: unknown): boolean {
   const anyCtx = ctx as { hasUI?: boolean; ui?: { custom?: unknown } };
   return anyCtx.hasUI !== false && typeof anyCtx.ui?.custom === "function";
+}
+
+function suppressLocalCommandWorking(ctx: unknown): () => void {
+  const ui = (ctx as { ui?: { setWorkingVisible?: (visible: boolean) => unknown } }).ui;
+  if (typeof ui?.setWorkingVisible !== "function") return () => {};
+  try {
+    ui.setWorkingVisible(false);
+  } catch {
+    return () => {};
+  }
+  return () => {
+    try {
+      ui.setWorkingVisible?.(true);
+    } catch {
+      // Ignore UI restore failures; command output/error handling has already completed.
+    }
+  };
 }
 
 async function showDisplayPanel(ctx: unknown, model: DisplayModel): Promise<void> {
@@ -166,7 +189,7 @@ function shouldSyncLspConfigAfterMasonCommand(input: string): boolean {
 
 function renderDisplayPanel(model: DisplayModel, state: { filter: string; filterDraft: string; editingFilter: boolean; scroll: number }, width: number): string[] {
   const safeWidth = Math.max(1, Math.floor(width));
-  const lines = renderDisplay(model, { width: safeWidth, filter: state.filter, scroll: state.scroll });
+  const lines = renderDisplay(model, { width: safeWidth, filter: state.filter, scroll: state.scroll, fixedHeight: true });
   if (state.editingFilter) {
     lines.splice(1, 0, truncateToWidth(`filter> ${state.filterDraft}`, safeWidth));
   }
