@@ -23,11 +23,11 @@ export class MasonCliError extends Error {
   }
 }
 
-export function createCliBridge(binary?: string): CliBridge {
+export function createCliBridge(binary?: string, startUrl?: string): CliBridge {
   return {
     run(args: string[], options?: CliRunOptions): Promise<unknown> {
-      return runCliJson(binary ?? resolveMasonBinary(), args, options);
-    }
+      return runCliJson(binary ?? resolveMasonBinary(process.env, startUrl ?? import.meta.url), args, options);
+    },
   };
 }
 

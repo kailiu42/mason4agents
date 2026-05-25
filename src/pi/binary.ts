@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, statSync } from "node:fs";
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,34 +28,100 @@ export function resolveMasonBinaryDetailed(env: NodeJS.ProcessEnv = process.env,
     return { path: explicit, source: "env" };
   }
 
-  const root = packageRoot(startUrl);
-  for (const candidate of bundledCandidates(root)) {
-    if (existsSync(candidate) && isExecutable(candidate)) {
-      return { path: candidate, source: "bundled" };
+  const roots = binarySearchRoots(startUrl);
+  const checked: string[] = [];
+  for (const root of roots) {
+    for (const candidate of bundledCandidates(root)) {
+      checked.push(candidate);
+      if (existsSync(candidate) && isExecutable(candidate, true)) {
+        return { path: candidate, source: "bundled" };
+      }
     }
   }
-  for (const candidate of developmentCandidates(root)) {
-    if (existsSync(candidate) && isExecutable(candidate)) {
-      return { path: candidate, source: "development" };
+  for (const root of roots) {
+    for (const candidate of developmentCandidates(root)) {
+      checked.push(candidate);
+      if (existsSync(candidate) && isExecutable(candidate, true)) {
+        return { path: candidate, source: "development" };
+      }
     }
   }
-  throw new Error(`Unable to locate mason4agents native binary. Set MASON4AGENTS_BIN or build crates/mason4agents.`);
+  throw new Error(`Unable to locate mason4agents native binary. Reinstall the plugin, set MASON4AGENTS_BIN to the Rust binary, or build crates/mason4agents. Checked ${checked.length} locations under: ${roots.join(", ")}`);
 }
 
-function isExecutable(filePath: string): boolean {
-  if (process.platform === "win32") {
-    return existsSync(filePath) && statSync(filePath).isFile();
+function isExecutable(filePath: string, repairMode = false): boolean {
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(filePath);
+  } catch {
+    return false;
+  }
+  if (!stat.isFile()) return false;
+  if (process.platform === "win32") return true;
+  try {
+    accessSync(filePath, constants.X_OK);
+    return true;
+  } catch {
+    if (!repairMode) return false;
   }
   try {
-    return statSync(filePath).isFile() && (accessSync(filePath, constants.X_OK), true);
+    chmodSync(filePath, stat.mode | 0o111);
+    accessSync(filePath, constants.X_OK);
+    return true;
   } catch {
     return false;
   }
 }
 
 
+function binarySearchRoots(startUrl: string): string[] {
+  const roots: string[] = [];
+  pushUnique(roots, packageRoot(startUrl));
+  for (const dir of ancestorDirs(startUrl)) pushUnique(roots, dir);
+  const selfRoot = packageRootFromSelfReference();
+  if (selfRoot) pushUnique(roots, selfRoot);
+  return roots;
+}
+
+function ancestorDirs(startUrl: string): string[] {
+  const startDir = dirnameFromFileUrl(startUrl);
+  if (!startDir) return [resolve(process.cwd())];
+  const dirs: string[] = [];
+  let dir = startDir;
+  for (let i = 0; i < 12; i += 1) {
+    dirs.push(dir);
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return dirs;
+}
+
+function pushUnique(values: string[], value: string): void {
+  if (!values.includes(value)) values.push(value);
+}
+
+function packageRootFromSelfReference(): string | undefined {
+  const resolver = (import.meta as ImportMeta & { resolve?: (specifier: string) => string }).resolve;
+  if (typeof resolver !== "function") return undefined;
+  try {
+    return dirname(fileURLToPath(resolver("mason4agents/package.json")));
+  } catch {
+    return undefined;
+  }
+}
+
+function dirnameFromFileUrl(url: string): string | undefined {
+  try {
+    return dirname(fileURLToPath(url));
+  } catch {
+    return undefined;
+  }
+}
+
 export function packageRoot(startUrl: string = import.meta.url): string {
-  let dir = dirname(fileURLToPath(startUrl));
+  const startDir = dirnameFromFileUrl(startUrl);
+  let dir = startDir ?? resolve(process.cwd());
   for (let i = 0; i < 8; i += 1) {
     if (existsSync(join(dir, "package.json"))) {
       return dir;
@@ -66,7 +132,7 @@ export function packageRoot(startUrl: string = import.meta.url): string {
     }
     dir = parent;
   }
-  return resolve(dirname(fileURLToPath(startUrl)), "..", "..");
+  return startDir ? resolve(startDir, "..", "..") : resolve(process.cwd());
 }
 
 function bundledCandidates(root: string): string[] {

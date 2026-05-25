@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -42,6 +42,32 @@ describe("binary resolver", () => {
     const resolved = resolveMasonBinaryDetailed({}, start);
     expect(resolved.source).toBe("bundled");
     expect(resolved.path).toBe(bundled);
+  });
+
+  test("searches ancestor directories when a nearer package.json is unrelated", () => {
+    const root = tempRoot();
+    mkdirSync(join(root, "cache"), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
+    writeFileSync(join(root, "cache", "package.json"), "{}");
+    const bundled = join(root, "native", process.platform === "win32" ? `mason4agents-${process.platform}-${process.arch}.exe` : `mason4agents-${process.platform}-${process.arch}`);
+    touchExecutable(bundled);
+    const start = pathToFileURL(join(root, "cache", "dist", "pi", "extension.js")).href;
+    const resolved = resolveMasonBinaryDetailed({}, start);
+    expect(resolved).toEqual({ path: bundled, source: "bundled" });
+  });
+
+  test("repairs non-executable bundled binaries", () => {
+    if (process.platform === "win32") return;
+    const root = tempRoot();
+    writeFileSync(join(root, "package.json"), "{}");
+    const bundled = join(root, "native", `mason4agents-${process.platform}-${process.arch}`);
+    mkdirSync(join(root, "native"), { recursive: true });
+    writeFileSync(bundled, "#!/bin/sh\nexit 0\n");
+    chmodSync(bundled, 0o644);
+    const start = pathToFileURL(join(root, "dist", "pi", "extension.js")).href;
+    const resolved = resolveMasonBinaryDetailed({}, start);
+    expect(resolved).toEqual({ path: bundled, source: "bundled" });
+    expect(statSync(bundled).mode & 0o111).not.toBe(0);
   });
 
   test("falls back to cargo target in development", () => {
