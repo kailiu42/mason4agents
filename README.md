@@ -1,5 +1,7 @@
 # mason4agents
 
+> TL;DR: if you have ever used [mason.nvim](https://github.com/mason-org/mason.nvim), this is it for coding agents.
+
 **Mason Registry powered tool installer for coding agents.**
 
 mason4agents downloads and manages LSP servers, formatters, linters, and other development tools from the [Mason Registry](https://github.com/mason-org/mason-registry) — the same registry used by mason.nvim. It installs tools to XDG-compliant directories and makes them available via PATH to coding agents such as [Oh My Pi](https://ohmyPi.com).
@@ -9,7 +11,6 @@ v1 supports **Pi CLI** (v0.75.5+). Future versions may add Claude Code, Codex CL
 ## Features
 
 - **Mason Registry compatible** — consumes the same registry, package schema, and release assets as mason.nvim
-- **No Neovim dependency** — standalone Rust CLI, no shelling out to Neovim
 - **Pi extension** — `/mason` interactive package manager, CLI-equivalent slash subcommands, 7 LLM-callable tools, automatic PATH injection
 - **XDG Base Directory** — data, config, cache, and state follow `$XDG_*` conventions
 - **Safe by default** — no build script execution without `--allow-build-scripts`, zip-slip protection, path traversal rejection, sandboxed temp directories with atomic rename
@@ -212,6 +213,21 @@ bun build src/pi/extension.ts --outdir dist/pi --target bun
 | Native binary | `native/mason4agents-{platform}-{arch}` | Bundled Pi extension lookup |
 | npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
 | Pi extension | `dist/pi/extension.js` | `pi --offline -e dist/pi/extension.js` |
+
+### Package and publish the current platform
+
+```bash
+# Build a local tarball for install testing
+bun run publish:local
+
+# Alias for the same local tarball flow
+bun run pack:local
+
+# Real npm publish
+bun run publish:npm
+```
+
+These commands package the current platform binary as `native/mason4agents-{platform}-{arch}`. For a multi-platform npm package, add the other `native/mason4agents-*` binaries before running the publish command.
 
 ## Tests
 

@@ -1,7 +1,13 @@
 {
   "name": "mason4agents",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "description": "Mason Registry powered tool installer for coding agents.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mason4agents/mason4agents.git"
+  },
   "bin": {
     "mason4agents": "dist/bin/mason4agents.js"
   },
@@ -12,20 +18,30 @@
     "formatter",
     "linter"
   ],
+  "omp": {
+    "extensions": [
+      "dist/pi/extension.js"
+    ]
+  },
   "pi": {
     "extensions": [
       "dist/pi/extension.js"
     ]
   },
   "files": [
-    "dist",
-    "native",
+    "dist/bin/mason4agents.js",
+    "dist/pi/extension.js",
+    "native/mason4agents-*",
     "package.json"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "verify": "bun run typecheck && cargo test && bun test",
     "build": "bun build src/bin/mason4agents.ts --outdir dist/bin --target bun && bun build src/pi/extension.ts --outdir dist/pi --target bun && cargo build --release && mkdir -p native && exe=$(node -e 'console.log(process.platform === \"win32\" ? \".exe\" : \"\")') && src=$(echo target/release/mason4agents$exe) && dst=$(echo native/mason4agents-$(node -e 'console.log(process.platform + \"-\" + process.arch)')$exe) && cp \"$src\" \"$dst\"",
-    "test": "bun test"
+    "test": "bun test",
+    "pack:local": "node scripts/publish.mjs --pack",
+    "publish:local": "node scripts/publish.mjs --pack",
+    "publish:npm": "node scripts/publish.mjs"
   },
   "devDependencies": {
     "@types/bun": "latest",

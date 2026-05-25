@@ -9,7 +9,6 @@ v1 支持 **Pi CLI**（v0.75.5+）。后续版本可能增加 Claude Code、Code
 ## 功能
 
 - **Mason Registry 兼容** — 使用与 mason.nvim 相同的 registry、包 schema 和 release assets
-- **不依赖 Neovim** — 独立 Rust CLI，无需 shell out 到 Neovim
 - **Pi 扩展** — `/mason` 交互式包管理器、等价 CLI 的 slash 子命令、7 个 LLM 可调用工具、自动 PATH 注入
 - **XDG Base Directory** — data、config、cache、state 遵循 `$XDG_*` 规范
 - **默认安全** — 无 `--allow-build-scripts` 不执行构建脚本、zip-slip 防护、路径穿越拒绝、临时目录原子重命名
@@ -212,6 +211,21 @@ bun build src/pi/extension.ts --outdir dist/pi --target bun
 | 原生二进制 | `native/mason4agents-{platform}-{arch}` | Pi 扩展内置查找 |
 | npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
 | Pi 扩展 | `dist/pi/extension.js` | `pi --offline -e dist/pi/extension.js` |
+
+### 打包并发布当前平台
+
+```bash
+# 构建本地 tarball，用于安装测试
+bun run publish:local
+
+# 同一本地 tarball 流程的别名
+bun run pack:local
+
+# 真正发布到 npm
+bun run publish:npm
+```
+
+这些命令会把当前平台二进制打包为 `native/mason4agents-{platform}-{arch}`。如果要发布多平台 npm 包，请先补齐其它 `native/mason4agents-*` 二进制，再执行发布命令。
 
 ## 测试
 
