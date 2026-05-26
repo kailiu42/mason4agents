@@ -99,6 +99,20 @@
   recovery was to check for `docs/UI.md`, write the missing file, and commit it
   separately after validating the worktree state.
 
+- **OMP compatibility should drive LSP recommendations, not editor popularity alone**:
+  Recommending LazyVim's `vtsls` surfaced that OMP only treats built-in servers as
+  partial overrides; non-built-in servers need a full `ServerConfig`. The fix was
+  to inspect OMP `lsp/config.ts` and `defaults.json`, cache the built-in list in
+  the plugin, prefer those server keys for recommendations, and only fall back to
+  LazyVim when OMP has no built-in LSP for that language.
+- **Duplicate LSP registrations came from mixing Mason aliases with OMP built-in
+  keys**: `rust_analyzer`/`ts_ls` appeared alongside
+  `rust-analyzer`/`typescript-language-server` because registry
+  `neovim.lspconfig` names were emitted even when the Mason package name already
+  matched an OMP built-in server key. The fix was to resolve server identity by
+  preferring the OMP built-in key first and only using registry aliases for
+  non-built-in servers.
+
 # Valuable Findings
 
 - **Layered commits enable targeted validation**: Splitting work into core
@@ -179,6 +193,23 @@
   made dynamic registry-driven logic look hard-coded. Neutral fixtures better
   communicate that production code derives options from package data.
 
+- **OMP exposes no extension API for default LSP discovery**: The extension host
+  provides commands, tools, messages, UI, and session hooks, but nothing like
+  `getDefaultLspServers()`. The reliable source of default support is
+  `packages/coding-agent/src/lsp/defaults.json`; `loadConfig()` is runtime
+  filtered by cwd, root markers, binaries, and user overrides, so it is not a
+  substitute for the built-in list.
+- **OMP merges built-in servers but validates custom servers from scratch**:
+  Built-ins can be overridden with only a `command`, because OMP merges them with
+  `defaults.json`. New servers are discarded unless `command`, `fileTypes`, and
+  `rootMarkers` are all present. That explains why
+  `typescript-language-server` worked immediately while `vtsls` needed a full
+  generated config.
+- **Repeated source inspection beats guessing host behavior from one working
+  server**: Seeing `typescript-language-server` load did not prove `vtsls` was
+  supported. Comparing OMP source, generated `lsp.json`, and actual startup
+  behavior revealed the exact built-in/custom split and the alias collision.
+
 # Things To Avoid
 
 - **Do not derive broad traits to work around ownership**: Deriving `Clone` on
@@ -247,3 +278,11 @@
 - **Do not claim a documentation deliverable was written without checking the
   filesystem**: For docs tasks, verify the target file exists and inspect status
   before reporting completion or committing.
+- **Do not use Mason registry `neovim.lspconfig` aliases as unconditional OMP
+  server keys**: A Mason package can already correspond to an OMP built-in under
+  a different canonical key. Emitting both creates duplicate registrations and
+  misleading generated metadata.
+- **Do not assume a visible `command` entry in `lsp.json` means OMP will load the
+  server**: For non-built-in servers, missing `fileTypes` or `rootMarkers` causes
+  OMP to reject the entry during normalization even though the JSON file itself
+  looks plausible.
