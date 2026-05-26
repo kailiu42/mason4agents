@@ -79,6 +79,12 @@ full Rust and TypeScript checks above.
 Keep `README.md` and `README.zh.md` structurally equivalent. When one changes,
 update the other with matching commands, paths, versions, and links.
 
+Keep `docs/recap.md` organized by topic, not by session. When adding or
+updating recap content, place entries under exactly these three top-level
+headings: `Problems & Solutions`, `Valuable Findings`, and `Things To Avoid`.
+Merge related or repeated lessons into the existing bullets instead of adding a
+new session section.
+
 ## Additional instructions
 
 Refers to ./.coding-agent-instructions/index.md for additional instructions.
