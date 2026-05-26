@@ -141,7 +141,7 @@ describe("Mason panel", () => {
     expect(syncs).toBe(3);
   });
 
-  test("filters locally, edits language, and shows installed table state", async () => {
+  test("filters locally, picks language and category, and shows installed table state", async () => {
     const { bridge: fake, calls } = bridge();
     const panel = createMasonPanel(fake);
     await panel.runCurrent();
@@ -160,11 +160,26 @@ describe("Mason panel", () => {
     await panel.handleInput("enter");
     const callCount = calls.length;
     await panel.handleInput("l");
-    await panel.handleInput("L");
-    await panel.handleInput("u");
-    await panel.handleInput("a");
+    expect(panel.render()).toContain("select language");
+    await panel.handleInput("/");
+    for (const key of "lua") await panel.handleInput(key);
+    expect(panel.render()).toContain("[/ lua]");
     await panel.handleInput("enter");
+    expect(panel.render()).not.toContain("select language");
     expect(panel.state.language).toBe("Lua");
+    expect(panel.render()).toContain("[l Lua]");
+    expect(calls).toHaveLength(callCount);
+
+    await panel.handleInput("c");
+    expect(panel.render()).toContain("select category");
+    await panel.handleInput("down");
+    await panel.handleInput("down");
+    await panel.handleInput("enter");
+    expect(panel.state.category).toBe("LSP");
+    expect(panel.render()).toContain("[l Lua]");
+    expect(panel.render()).toContain("[c LSP]");
+    expect(panel.render()).toContain("lua-language-server");
+    expect(panel.render()).not.toContain("stylua");
     expect(calls).toHaveLength(callCount);
 
     await panel.handleInput("tab");
@@ -215,7 +230,7 @@ describe("Mason panel", () => {
     expect((lines as string[]).join("\n")).toContain("stylua");
     expect((lines as string[]).every((line) => stripAnsi(line).length <= 24)).toBe(true);
     component?.handleInput("/");
-    expect((component?.render(24) as string[]).join("\n")).toContain("name>");
+    expect((component?.render(48) as string[]).join("\n")).toContain("[/]");
     component?.handleInput("\x1b[27u");
     component?.handleInput("enter");
     expect((component?.render(48) as string[]).join("\n")).toContain("package details");

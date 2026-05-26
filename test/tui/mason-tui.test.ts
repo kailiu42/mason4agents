@@ -179,7 +179,12 @@ describe("Mason TUI core", () => {
     expect(tui.render()).toContain("▶ lua-language-server");
 
     await tui.handleInput("/");
-    for (const key of "stylua") await tui.handleInput(key);
+    for (const key of "st") await tui.handleInput(key);
+    expect(tui.render()).toContain("lua-language-server");
+    await tui.handleInput("y");
+    expect(tui.render()).toContain("▶ stylua");
+    expect(tui.render()).not.toContain("▶ lua-language-server");
+    for (const key of "lua") await tui.handleInput(key);
     await tui.handleInput("enter");
     expect(tui.state.selectedIndex).toBe(0);
     expect(tui.render()).toContain("▶ stylua");
@@ -228,7 +233,7 @@ describe("Mason TUI core", () => {
     expect(lines.join("\n")).toContain("\x1b[38;5;244m  ╱  \x1b[39m");
     expect(lines.join("\n")).not.toContain("\x1b[48;5;27m  ╱");
     expect(lines.join("\n")).toContain("\x1b[48;5;240m▶ stylua");
-    expect(lines.join("\n")).toContain("\x1b[38;5;39m[Tab/S-Tab/←→]/[↑↓/Pg]/[/]/[l]\x1b[39m");
+    expect(lines.join("\n")).toContain("\x1b[38;5;39m[Tab/S-Tab/←→]/[↑↓/Pg]/[/]/[l]/[c]\x1b[39m");
     expect(lines.join("\n")).toContain("\x1b[38;5;250mbrowse\x1b[39m");
     expect(lines.every((line) => stripAnsi(line).length <= 72)).toBe(true);
 
@@ -266,7 +271,7 @@ describe("Mason TUI core", () => {
     expect(MASON_TUI_COMMANDS.map((command) => command.label)).toEqual(["list", "installed", "check update", "refresh", "doctor"]);
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("╱");
-    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [l]: lang │ [Enter]: detail │ [i/u/r]: install/update/uninstall");
+    expect(tui.render()).toContain("[c]: cat │ [Enter]: detail");
     expect(tui.render()).not.toContain("showing 1-");
     await tui.handleInput("tab");
     expect(tui.state.command).toBe("installed");
@@ -275,7 +280,7 @@ describe("Mason TUI core", () => {
     await tui.handleInput("right");
     expect(tui.state.command).toBe("update");
     expect(tui.render()).toContain("[check update]");
-    expect(tui.render()).toContain("[l]: lang");
+    expect(tui.render()).toContain("[c]: cat");
     expect(calls).toContainEqual(["list", "--outdated"]);
     await tui.handleInput("right");
     expect(tui.state.command).toBe("refresh");
@@ -291,7 +296,7 @@ describe("Mason TUI core", () => {
     expect(tui.state.command).toBe("list");
   });
 
-  test("filters list rows by name and language without running search", async () => {
+  test("filters list rows by name, language, and category without running search", async () => {
     const calls: string[][] = [];
     const fake: MasonTuiHost = {
       async runCli(args: string[]) {
@@ -315,18 +320,52 @@ describe("Mason TUI core", () => {
     const tui = createMasonTui(fake);
     await tui.runCurrent();
 
-    await tui.handleInput("l");
-    for (const key of "TypeScript") await tui.handleInput(key);
+    await tui.handleInput("c");
+    expect(tui.render()).toContain("select category");
+    expect(tui.render()).toContain("All categories");
+    expect(tui.render()).toContain("Formatter");
+    expect(tui.render()).toContain("LSP");
+    await tui.handleInput("down");
+    await tui.handleInput("down");
     await tui.handleInput("enter");
 
+    expect(tui.state.category).toBe("LSP");
+    expect(tui.render()).toContain("[c LSP]");
+    expect(tui.render()).toContain("lua-language-server");
     expect(tui.render()).toContain("typescript-language-server");
     expect(tui.render()).not.toContain("▶ stylua");
     expect(calls).toEqual([["list"]]);
 
     await tui.handleInput("/");
-    for (const key of "server") await tui.handleInput(key);
+    for (const key of "typ") await tui.handleInput(key);
+    expect(tui.render()).toContain("typescript-language-server");
+    expect(tui.render()).not.toContain("lua-language-server");
+    await tui.handleInput("enter");
+    expect(tui.render()).toContain("[/ typ]");
+    expect(tui.render()).toContain("[c LSP]");
+    expect(calls).toEqual([["list"]]);
+
+    await tui.handleInput("/");
+    for (let index = 0; index < "typ".length; index += 1) await tui.handleInput("backspace");
+    await tui.handleInput("enter");
+    expect(tui.render()).not.toContain("[/ typ]");
+
+    await tui.handleInput("l");
+    expect(tui.render()).toContain("select language");
+    expect(tui.render()).toContain("JavaScript");
+    expect(tui.render()).toContain("Lua");
+    expect(tui.render()).toContain("TypeScript");
+    await tui.handleInput("/");
+    for (const key of "typ") await tui.handleInput(key);
+    expect(tui.render()).toContain("[/ typ]");
     await tui.handleInput("enter");
 
+    expect(tui.state.edit).toBeUndefined();
+    expect(tui.render()).not.toContain("select language");
+
+    expect(tui.state.language).toBe("TypeScript");
+    expect(tui.render()).toContain("[l TypeScript]");
+    expect(tui.render()).toContain("[c LSP]");
     expect(tui.render()).toContain("typescript-language-server");
     expect(tui.render()).not.toContain("lua-language-server");
     expect(calls).toEqual([["list"]]);
