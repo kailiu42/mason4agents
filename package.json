@@ -3,7 +3,7 @@
   "version": "0.1.2",
   "description": "Mason Registry powered tool installer for coding agents.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mason4agents/mason4agents.git"

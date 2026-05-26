@@ -290,4 +290,4 @@ Build scripts (`source.build.run`) are **disabled by default** and require expli
 
 ## License
 
-Apache-2.0
+MIT

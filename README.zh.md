@@ -289,4 +289,4 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && 
 
 ## 许可证
 
-Apache-2.0
+MIT
