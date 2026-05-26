@@ -75,18 +75,6 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
     }
   });
 
-  registerCommand(ctx, "mason-doctor", "Run mason4agents doctor", async (_args, commandCtx) => {
-    const restoreWorking = suppressLocalCommandWorking(commandCtx);
-    try {
-      const model = await executeMasonCommand("doctor", cliBridge);
-      publishMessage(apiCtx, "mason4agents-doctor", renderDisplayText(model));
-    } catch (err) {
-      reportCommandError(commandCtx, apiCtx, "mason-doctor", err);
-    } finally {
-      restoreWorking();
-    }
-  });
-
   const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: syncMasonLspConfig });
   registerSessionStart(ctx, () => {
     ensureMasonBinOnPath();

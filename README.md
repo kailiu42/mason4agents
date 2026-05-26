@@ -116,7 +116,6 @@ Run CLI-equivalent slash subcommands directly when you do not need the panel:
 /mason uninstall stylua
 /mason doctor
 /mason register --omp
-/mason-doctor
 ```
 
 Direct non-long slash-command results are rendered as human-readable tables or summaries, not raw JSON. Direct long commands (`/mason install`, `/mason update`, `/mason uninstall`, `/mason refresh`) use the same progress panel when custom UI is available and fall back to the final rendered result otherwise.

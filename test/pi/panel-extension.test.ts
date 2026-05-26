@@ -376,7 +376,7 @@ describe("Pi extension", () => {
       const { bridge: fake } = bridge();
       const result = await activate(ctx, fake);
       expect(result.name).toBe("mason4agents");
-      expect(commands).toEqual(["mason", "mason-doctor"]);
+      expect(commands).toEqual(["mason"]);
       expect(tools).toContain("mason_install");
       expect(events).toEqual(["session_start"]);
       expect((process.env.PATH ?? "").startsWith(result.binDir)).toBe(true);
@@ -387,14 +387,15 @@ describe("Pi extension", () => {
       };
       await handlers.mason?.("", commandCtx);
       await handlers.mason?.("search stylua --language Lua", commandCtx);
-      await handlers["mason-doctor"]?.("", commandCtx);
+      await handlers.mason?.("doctor", commandCtx);
       expect(messages).toHaveLength(3);
       expect(workingVisible).toEqual([false, true, false, true, false, true]);
       expect(messages[0]).toMatchObject({ customType: "mason4agents", display: true });
       expect(messages[1]).toMatchObject({ customType: "mason4agents", display: true });
       expect(String((messages[1] as { content?: unknown }).content)).toContain("stylua");
       expect(String((messages[1] as { content?: unknown }).content)).not.toContain("{");
-      expect(messages[2]).toMatchObject({ customType: "mason4agents-doctor", display: true });
+      expect(messages[2]).toMatchObject({ customType: "mason4agents", display: true });
+      expect(String((messages[2] as { content?: unknown }).content)).toContain("Overall: ok");
     } finally {
       process.env.HOME = oldHome;
       if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
@@ -433,7 +434,7 @@ describe("Pi extension", () => {
     };
     try {
       await activate(ctx);
-      await handlers["mason-doctor"]?.("", { hasUI: false });
+      await handlers.mason?.("doctor", { hasUI: false });
       expect(messages).toHaveLength(1);
       expect(String((messages[0] as { content?: unknown }).content)).toContain("Overall: ok");
     } finally {
@@ -561,11 +562,10 @@ describe("Pi extension", () => {
     try {
       await activate(ctx, failing);
       await handlers.mason?.("doctor", commandCtx);
-      await handlers["mason-doctor"]?.("", commandCtx);
       expect(customCalls).toBe(0);
-      expect(messages).toHaveLength(2);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ customType: "mason4agents", display: true });
       expect(String((messages[0] as { content?: unknown }).content)).toContain("Error: Unable to locate mason4agents native binary.");
-      expect(messages[1]).toMatchObject({ customType: "mason4agents-doctor", display: true });
     } finally {
       process.env.HOME = oldHome;
       if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
