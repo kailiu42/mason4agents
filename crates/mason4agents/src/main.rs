@@ -3,8 +3,10 @@ use mason4agents::doctor::doctor;
 use mason4agents::installer::Installer;
 use mason4agents::paths::MasonPaths;
 use mason4agents::platform::Platform;
+use mason4agents::progress::{ProgressSink, StderrProgressSink};
 use mason4agents::registry::{
-    load_or_refresh, refresh_registry, search_packages, PackageSummary, RefreshSummary,
+    load_or_refresh_with_progress, refresh_registry_with_progress, search_packages, PackageSummary,
+    RefreshSummary,
 };
 use mason4agents::store::{InstalledPackage, InstalledState};
 use mason4agents::suggestions::{suggest_packages, SuggestionItem, SuggestionOptions};
@@ -118,8 +120,9 @@ impl Output {
 fn main() -> ExitCode {
     let raw_args: Vec<String> = std::env::args().collect();
     let is_json = raw_args.iter().any(|a| a == "--json");
+    let progress = StderrProgressSink::new(is_json);
     match Cli::try_parse() {
-        Ok(cli) => match run(cli) {
+        Ok(cli) => match run(cli, &progress) {
             Ok(output) => {
                 if is_json {
                     println!(
@@ -171,12 +174,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<Output> {
+fn run(cli: Cli, progress: &dyn ProgressSink) -> Result<Output> {
     let paths = MasonPaths::from_env()?;
     let platform = Platform::current();
     match cli.command {
         Command::Refresh { registry } => {
-            let result = refresh_registry(&paths, registry.as_deref())?;
+            let result = refresh_registry_with_progress(&paths, registry.as_deref(), progress)?;
             Ok(format_refresh(&result))
         }
         Command::Search {
@@ -185,7 +188,7 @@ fn run(cli: Cli) -> Result<Output> {
             language,
             registry,
         } => {
-            let cache = load_or_refresh(&paths, registry.as_deref())?;
+            let cache = load_or_refresh_with_progress(&paths, registry.as_deref(), progress)?;
             let state = InstalledState::load(&paths)?;
             let list = search_packages(
                 &cache,
@@ -207,7 +210,7 @@ fn run(cli: Cli) -> Result<Output> {
                 let list = state.packages.values().cloned().collect::<Vec<_>>();
                 Ok(format_installed_list(&list))
             } else {
-                let cache = load_or_refresh(&paths, registry.as_deref())?;
+                let cache = load_or_refresh_with_progress(&paths, registry.as_deref(), progress)?;
                 let mut list = search_packages(&cache, &state, &platform, None, None, None);
                 if outdated {
                     list.retain(|p| p.outdated);
@@ -221,7 +224,7 @@ fn run(cli: Cli) -> Result<Output> {
             refresh_suggestions,
             suggestions_source,
         } => {
-            let cache = load_or_refresh(&paths, registry.as_deref())?;
+            let cache = load_or_refresh_with_progress(&paths, registry.as_deref(), progress)?;
             let state = InstalledState::load(&paths)?;
             let project_path = match path {
                 Some(path) => path,
@@ -251,8 +254,12 @@ fn run(cli: Cli) -> Result<Output> {
                 ));
             }
             let installer = Installer::new(paths, platform);
-            let results =
-                installer.install_requests(&packages, registry.as_deref(), allow_build_scripts)?;
+            let results = installer.install_requests_with_progress(
+                &packages,
+                registry.as_deref(),
+                allow_build_scripts,
+                progress,
+            )?;
             Ok(format_install_results(&results))
         }
         Command::Uninstall { packages } => {
@@ -262,7 +269,7 @@ fn run(cli: Cli) -> Result<Output> {
                 ));
             }
             let installer = Installer::new(paths, platform);
-            let results = installer.uninstall(&packages)?;
+            let results = installer.uninstall_with_progress(&packages, progress)?;
             Ok(format_uninstall_results(&results))
         }
         Command::Update {
@@ -271,8 +278,12 @@ fn run(cli: Cli) -> Result<Output> {
             allow_build_scripts,
         } => {
             let installer = Installer::new(paths, platform);
-            let results =
-                installer.update_requests(&packages, registry.as_deref(), allow_build_scripts)?;
+            let results = installer.update_requests_with_progress(
+                &packages,
+                registry.as_deref(),
+                allow_build_scripts,
+                progress,
+            )?;
             Ok(format_install_results(&results))
         }
         Command::Which { executable } => {

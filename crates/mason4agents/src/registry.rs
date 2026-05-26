@@ -1,7 +1,8 @@
-use crate::download::{fetch_bytes, local_path};
+use crate::download::{fetch_bytes_with_progress, local_path};
 use crate::package_spec::{NormalizedPackage, RawPackageSpec};
 use crate::paths::MasonPaths;
 use crate::platform::Platform;
+use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
 use crate::store::InstalledState;
 use crate::types::{msg, M4aError, Result};
 use chrono::{DateTime, Utc};
@@ -46,25 +47,61 @@ pub struct RefreshSummary {
 }
 
 pub fn refresh_registry(paths: &MasonPaths, source: Option<&str>) -> Result<RefreshSummary> {
-    paths.ensure_base_dirs()?;
-    let source = source.unwrap_or(DEFAULT_REGISTRY_URL).to_owned();
-    let packages = load_registry_source(&source)?;
-    let cache = RegistryCache {
-        refreshed_at: Utc::now(),
-        source: source.clone(),
-        packages,
-    };
-    let bytes = serde_json::to_vec_pretty(&cache)?;
-    let checksum = hex::encode(Sha256::digest(&bytes));
-    fs::create_dir_all(&paths.registry_dir)?;
-    fs::write(paths.registry_index_file(), &bytes)?;
-    fs::write(paths.registry_checksum_file(), checksum.as_bytes())?;
-    Ok(RefreshSummary {
-        source,
-        package_count: cache.packages.len(),
-        cache_file: paths.registry_index_file(),
-        checksum,
-    })
+    let progress = NoProgressSink;
+    refresh_registry_with_progress(paths, source, &progress)
+}
+
+pub fn refresh_registry_with_progress(
+    paths: &MasonPaths,
+    source: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<RefreshSummary> {
+    let result = (|| -> Result<RefreshSummary> {
+        paths.ensure_base_dirs()?;
+        let source = source.unwrap_or(DEFAULT_REGISTRY_URL).to_owned();
+        progress.event(
+            "refresh",
+            "registry",
+            ProgressStatus::Started,
+            None,
+            "loading registry source",
+        );
+        let packages = load_registry_source_with_progress(&source, progress)?;
+        progress.event(
+            "refresh",
+            "registry",
+            ProgressStatus::Running,
+            None,
+            "writing registry cache",
+        );
+        let cache = RegistryCache {
+            refreshed_at: Utc::now(),
+            source: source.clone(),
+            packages,
+        };
+        let bytes = serde_json::to_vec_pretty(&cache)?;
+        let checksum = hex::encode(Sha256::digest(&bytes));
+        fs::create_dir_all(&paths.registry_dir)?;
+        fs::write(paths.registry_index_file(), &bytes)?;
+        fs::write(paths.registry_checksum_file(), checksum.as_bytes())?;
+        Ok(RefreshSummary {
+            source,
+            package_count: cache.packages.len(),
+            cache_file: paths.registry_index_file(),
+            checksum,
+        })
+    })();
+    match &result {
+        Ok(_) => progress.event(
+            "refresh",
+            "registry",
+            ProgressStatus::Succeeded,
+            None,
+            "registry refreshed",
+        ),
+        Err(err) => emit_error(progress, "refresh", "registry", None, err),
+    }
+    result
 }
 
 pub fn load_cached_registry(paths: &MasonPaths) -> Result<RegistryCache> {
@@ -85,14 +122,30 @@ pub fn load_cached_registry(paths: &MasonPaths) -> Result<RegistryCache> {
 }
 
 pub fn load_or_refresh(paths: &MasonPaths, source: Option<&str>) -> Result<RegistryCache> {
+    let progress = NoProgressSink;
+    load_or_refresh_with_progress(paths, source, &progress)
+}
+
+pub fn load_or_refresh_with_progress(
+    paths: &MasonPaths,
+    source: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<RegistryCache> {
     if let Some(source) = source {
-        refresh_registry(paths, Some(source))?;
+        refresh_registry_with_progress(paths, Some(source), progress)?;
         load_cached_registry(paths)
     } else {
         match load_cached_registry(paths) {
             Ok(cache) => Ok(cache),
             Err(M4aError::RegistryCacheMissing) => {
-                refresh_registry(paths, None)?;
+                progress.event(
+                    "refresh",
+                    "registry",
+                    ProgressStatus::Running,
+                    None,
+                    "registry cache missing; refreshing",
+                );
+                refresh_registry_with_progress(paths, None, progress)?;
                 load_cached_registry(paths)
             }
             Err(err) => Err(err),
@@ -188,11 +241,19 @@ pub fn normalize_package(
 }
 
 pub fn load_registry_source(source: &str) -> Result<BTreeMap<String, RawPackageSpec>> {
+    let progress = NoProgressSink;
+    load_registry_source_with_progress(source, &progress)
+}
+
+pub fn load_registry_source_with_progress(
+    source: &str,
+    progress: &dyn ProgressSink,
+) -> Result<BTreeMap<String, RawPackageSpec>> {
     if let Some(path) = local_path(source) {
         return load_registry_path(path);
     }
     if source.starts_with("http://") || source.starts_with("https://") {
-        let bytes = fetch_bytes(source)?;
+        let bytes = fetch_bytes_with_progress(source, "refresh", None, progress)?;
         if source.ends_with(".zip") || source.contains("github.com") {
             return load_registry_zip(Cursor::new(bytes));
         }

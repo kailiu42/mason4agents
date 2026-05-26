@@ -20,6 +20,21 @@ fn output_json(assert: assert_cmd::assert::Assert) -> Value {
     let output = assert.get_output();
     serde_json::from_slice(&output.stdout).unwrap()
 }
+fn stderr_progress_events(assert: &assert_cmd::assert::Assert) -> Vec<Value> {
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(!stderr.trim().is_empty());
+    stderr
+        .lines()
+        .map(|line| {
+            let event: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(event["kind"], "progress");
+            assert_eq!(event["schema_version"], 1);
+            assert!(event["elapsed_ms"].as_u64().is_some());
+            assert!(event["message"].as_str().is_some());
+            event
+        })
+        .collect()
+}
 
 fn write_zip(path: &Path, text: &[u8]) {
     let file = fs::File::create(path).unwrap();
@@ -225,6 +240,46 @@ fn cli_refresh_search_install_which_env_uninstall_flow() {
     assert!(!bin.exists());
 }
 
+#[test]
+fn cli_json_progress_uses_stderr_ndjson_and_keeps_stdout_envelope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = write_registry(tmp.path());
+
+    let refresh_assert = cmd(tmp.path())
+        .args([
+            "refresh",
+            "--registry",
+            registry.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success();
+    let refresh_stdout: Value =
+        serde_json::from_slice(&refresh_assert.get_output().stdout).unwrap();
+    assert_eq!(refresh_stdout["ok"], true);
+    let refresh_events = stderr_progress_events(&refresh_assert);
+    assert!(refresh_events.iter().any(|event| {
+        event["operation"] == "refresh"
+            && event["phase"] == "registry"
+            && event["status"] == "succeeded"
+    }));
+
+    let install_assert = cmd(tmp.path())
+        .args(["install", "hello", "--json"])
+        .assert()
+        .success();
+    let install_stdout: Value =
+        serde_json::from_slice(&install_assert.get_output().stdout).unwrap();
+    assert_eq!(install_stdout["ok"], true);
+    assert_eq!(install_stdout["data"][0]["package"], "hello");
+    let install_events = stderr_progress_events(&install_assert);
+    assert!(install_events.iter().any(|event| {
+        event["operation"] == "install"
+            && event["package"] == "hello"
+            && event["phase"] == "package"
+            && event["status"] == "succeeded"
+    }));
+}
 #[test]
 fn cli_error_stdout_is_stable_json() {
     let tmp = tempfile::tempdir().unwrap();

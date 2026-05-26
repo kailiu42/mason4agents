@@ -9,6 +9,7 @@ pub mod locks;
 pub mod package_spec;
 pub mod paths;
 pub mod platform;
+pub mod progress;
 pub mod purl;
 pub mod registry;
 pub mod store;

@@ -1,12 +1,13 @@
 use crate::archive::{split_archive_spec, unpack_or_copy};
-use crate::download::{download_to_cache, local_path};
+use crate::download::{download_to_cache_with_progress, local_path};
 use crate::installers::{build, generic, github, manager, openvsx};
 use crate::linker::{cleanup_package_links, create_package_links};
 use crate::locks::PackageLock;
 use crate::package_spec::NormalizedPackage;
 use crate::paths::MasonPaths;
 use crate::platform::Platform;
-use crate::registry::{load_or_refresh, normalize_package};
+use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
+use crate::registry::{load_or_refresh_with_progress, normalize_package};
 use crate::store::{InstalledPackage, InstalledState};
 use crate::types::{msg, M4aError, Result};
 use chrono::Utc;
@@ -59,15 +60,81 @@ impl Installer {
         registry_source: Option<&str>,
         allow_build_scripts: bool,
     ) -> Result<Vec<InstallResult>> {
-        self.paths.ensure_base_dirs()?;
-        let cache = load_or_refresh(&self.paths, registry_source)?;
-        let mut out = Vec::new();
-        for request in requests {
-            let (name, version) = parse_package_request(request);
-            let normalized = normalize_package(&cache, name, version.as_deref(), &self.platform)?;
-            out.push(self.install_normalized(normalized, allow_build_scripts)?);
+        let progress = NoProgressSink;
+        self.install_requests_with_progress(
+            requests,
+            registry_source,
+            allow_build_scripts,
+            &progress,
+        )
+    }
+
+    pub fn install_requests_with_progress(
+        &self,
+        requests: &[String],
+        registry_source: Option<&str>,
+        allow_build_scripts: bool,
+        progress: &dyn ProgressSink,
+    ) -> Result<Vec<InstallResult>> {
+        self.install_requests_for_operation(
+            "install",
+            requests,
+            registry_source,
+            allow_build_scripts,
+            progress,
+        )
+    }
+
+    fn install_requests_for_operation(
+        &self,
+        operation: &str,
+        requests: &[String],
+        registry_source: Option<&str>,
+        allow_build_scripts: bool,
+        progress: &dyn ProgressSink,
+    ) -> Result<Vec<InstallResult>> {
+        let result = (|| -> Result<Vec<InstallResult>> {
+            progress.event(
+                operation,
+                "request",
+                ProgressStatus::Started,
+                None,
+                "preparing package requests",
+            );
+            self.paths.ensure_base_dirs()?;
+            let cache = load_or_refresh_with_progress(&self.paths, registry_source, progress)?;
+            let mut out = Vec::new();
+            for request in requests {
+                let (name, version) = parse_package_request(request);
+                progress.event(
+                    operation,
+                    "resolve",
+                    ProgressStatus::Running,
+                    Some(name),
+                    "resolving package",
+                );
+                let normalized =
+                    normalize_package(&cache, name, version.as_deref(), &self.platform)?;
+                out.push(self.install_normalized_with_progress(
+                    operation,
+                    normalized,
+                    allow_build_scripts,
+                    progress,
+                )?);
+            }
+            Ok(out)
+        })();
+        match &result {
+            Ok(_) => progress.event(
+                operation,
+                "request",
+                ProgressStatus::Succeeded,
+                None,
+                "package requests completed",
+            ),
+            Err(err) => emit_error(progress, operation, "request", None, err),
         }
-        Ok(out)
+        result
     }
 
     pub fn update_requests(
@@ -76,48 +143,147 @@ impl Installer {
         registry_source: Option<&str>,
         allow_build_scripts: bool,
     ) -> Result<Vec<InstallResult>> {
-        let _state_lock = acquire_state_lock(&self.paths)?;
-        let state = InstalledState::load(&self.paths)?;
-        let requests = if packages.is_empty() {
-            state.packages.keys().cloned().collect::<Vec<_>>()
-        } else {
-            packages.to_vec()
-        };
-        for name in &requests {
-            validate_package_name(name)?;
+        let progress = NoProgressSink;
+        self.update_requests_with_progress(
+            packages,
+            registry_source,
+            allow_build_scripts,
+            &progress,
+        )
+    }
+
+    pub fn update_requests_with_progress(
+        &self,
+        packages: &[String],
+        registry_source: Option<&str>,
+        allow_build_scripts: bool,
+        progress: &dyn ProgressSink,
+    ) -> Result<Vec<InstallResult>> {
+        let result = (|| -> Result<Vec<InstallResult>> {
+            progress.event(
+                "update",
+                "request",
+                ProgressStatus::Started,
+                None,
+                "preparing update requests",
+            );
+            let _state_lock = acquire_state_lock(&self.paths)?;
+            let state = InstalledState::load(&self.paths)?;
+            let requests = if packages.is_empty() {
+                state.packages.keys().cloned().collect::<Vec<_>>()
+            } else {
+                packages.to_vec()
+            };
+            for name in &requests {
+                validate_package_name(name)?;
+            }
+            drop(_state_lock);
+            self.install_requests_for_operation(
+                "update",
+                &requests,
+                registry_source,
+                allow_build_scripts,
+                progress,
+            )
+        })();
+        match &result {
+            Ok(_) => progress.event(
+                "update",
+                "request",
+                ProgressStatus::Succeeded,
+                None,
+                "update requests completed",
+            ),
+            Err(err) => emit_error(progress, "update", "request", None, err),
         }
-        drop(_state_lock);
-        self.install_requests(&requests, registry_source, allow_build_scripts)
+        result
     }
 
     pub fn uninstall(&self, packages: &[String]) -> Result<Vec<UninstallResult>> {
-        self.paths.ensure_base_dirs()?;
-        let _state_lock = acquire_state_lock(&self.paths)?;
-        let mut state = InstalledState::load(&self.paths)?;
-        let mut out = Vec::new();
-        for package in packages {
-            validate_package_name(package)?;
-            let _lock = PackageLock::acquire(&self.paths, package)?;
-            if let Some(installed) = state.packages.remove(package) {
-                cleanup_package_links(&self.paths, &installed)?;
-                let dir = self.paths.package_dir(package);
-                if dir.exists() {
-                    fs::remove_dir_all(dir)?;
+        let progress = NoProgressSink;
+        self.uninstall_with_progress(packages, &progress)
+    }
+
+    pub fn uninstall_with_progress(
+        &self,
+        packages: &[String],
+        progress: &dyn ProgressSink,
+    ) -> Result<Vec<UninstallResult>> {
+        let result = (|| -> Result<Vec<UninstallResult>> {
+            progress.event(
+                "uninstall",
+                "request",
+                ProgressStatus::Started,
+                None,
+                "preparing uninstall requests",
+            );
+            self.paths.ensure_base_dirs()?;
+            let _state_lock = acquire_state_lock(&self.paths)?;
+            let mut state = InstalledState::load(&self.paths)?;
+            let mut out = Vec::new();
+            for package in packages {
+                validate_package_name(package)?;
+                let _lock = PackageLock::acquire(&self.paths, package)?;
+                if let Some(installed) = state.packages.remove(package) {
+                    progress.event(
+                        "uninstall",
+                        "remove",
+                        ProgressStatus::Running,
+                        Some(package),
+                        "removing package links and files",
+                    );
+                    cleanup_package_links(&self.paths, &installed)?;
+                    let dir = self.paths.package_dir(package);
+                    if dir.exists() {
+                        fs::remove_dir_all(dir)?;
+                    }
+                    progress.event(
+                        "uninstall",
+                        "remove",
+                        ProgressStatus::Succeeded,
+                        Some(package),
+                        "package removed",
+                    );
+                    out.push(UninstallResult {
+                        package: package.clone(),
+                        removed: true,
+                    });
+                } else {
+                    progress.event(
+                        "uninstall",
+                        "remove",
+                        ProgressStatus::Skipped,
+                        Some(package),
+                        "package is not installed",
+                    );
+                    out.push(UninstallResult {
+                        package: package.clone(),
+                        removed: false,
+                    });
                 }
-                out.push(UninstallResult {
-                    package: package.clone(),
-                    removed: true,
-                });
-            } else {
-                out.push(UninstallResult {
-                    package: package.clone(),
-                    removed: false,
-                });
             }
+            progress.event(
+                "uninstall",
+                "state",
+                ProgressStatus::Running,
+                None,
+                "writing install state",
+            );
+            state.save(&self.paths)?;
+            drop(_state_lock);
+            Ok(out)
+        })();
+        match &result {
+            Ok(_) => progress.event(
+                "uninstall",
+                "request",
+                ProgressStatus::Succeeded,
+                None,
+                "uninstall completed",
+            ),
+            Err(err) => emit_error(progress, "uninstall", "request", None, err),
         }
-        state.save(&self.paths)?;
-        drop(_state_lock);
-        Ok(out)
+        result
     }
 
     pub fn which(&self, executable: &str) -> Result<WhichResult> {
@@ -155,123 +321,208 @@ impl Installer {
         })
     }
 
-    fn install_normalized(
+    fn install_normalized_with_progress(
         &self,
+        operation: &str,
         package: NormalizedPackage,
         allow_build_scripts: bool,
+        progress: &dyn ProgressSink,
     ) -> Result<InstallResult> {
-        validate_package_name(&package.name)?;
-        let name = &package.name;
-        for spec in ["bins", "share", "opt"] {
-            let keys: &BTreeMap<String, String> = match spec {
-                "bins" => &package.bins,
-                "share" => &package.share,
-                "opt" => &package.opt,
-                _ => unreachable!(),
-            };
-            for key in keys.keys() {
-                validate_package_name(key).map_err(|_| {
-                    msg(format!(
-                        "package '{name}' has invalid key '{key}' in '{spec}'"
-                    ))
-                })?;
+        let package_name = package.name.clone();
+        progress.event(
+            operation,
+            "package",
+            ProgressStatus::Started,
+            Some(&package_name),
+            "starting package install",
+        );
+        let result = (|| -> Result<InstallResult> {
+            validate_package_name(&package.name)?;
+            let name = &package.name;
+            for spec in ["bins", "share", "opt"] {
+                let keys: &BTreeMap<String, String> = match spec {
+                    "bins" => &package.bins,
+                    "share" => &package.share,
+                    "opt" => &package.opt,
+                    _ => unreachable!(),
+                };
+                for key in keys.keys() {
+                    validate_package_name(key).map_err(|_| {
+                        msg(format!(
+                            "package '{name}' has invalid key '{key}' in '{spec}'"
+                        ))
+                    })?;
+                }
             }
-        }
-        if !package.source.build_scripts.is_empty() && !allow_build_scripts {
-            return Err(M4aError::BuildScriptsDisabled {
-                package: package.name.clone(),
-                scripts: package.source.build_scripts.clone(),
-            });
-        }
-        let _state_lock = acquire_state_lock(&self.paths)?;
-        let _lock = PackageLock::acquire(&self.paths, &package.name)?;
-        let staging = self.paths.package_tmp_dir(&package.name);
-        let final_dir = self.paths.package_dir(&package.name);
-        let old_dir = self.paths.package_old_dir(&package.name);
-        remove_dir_if_exists(&staging)?;
-        remove_dir_if_exists(&old_dir)?;
-        fs::create_dir_all(&staging)?;
-        let install_result = (|| -> Result<()> {
-            install_source(&self.paths, &package, &staging)?;
-            if !package.source.build_scripts.is_empty() {
-                build::run_build_scripts(&package.source.build_scripts, &staging)?;
+            if !package.source.build_scripts.is_empty() && !allow_build_scripts {
+                return Err(M4aError::BuildScriptsDisabled {
+                    package: package.name.clone(),
+                    scripts: package.source.build_scripts.clone(),
+                });
             }
-            Ok(())
-        })();
-        if let Err(err) = install_result {
+            progress.event(
+                operation,
+                "lock",
+                ProgressStatus::Running,
+                Some(&package.name),
+                "acquiring install locks",
+            );
+            let _state_lock = acquire_state_lock(&self.paths)?;
+            let _lock = PackageLock::acquire(&self.paths, &package.name)?;
+            let staging = self.paths.package_tmp_dir(&package.name);
+            let final_dir = self.paths.package_dir(&package.name);
+            let old_dir = self.paths.package_old_dir(&package.name);
+            progress.event(
+                operation,
+                "staging",
+                ProgressStatus::Running,
+                Some(&package.name),
+                "preparing staging directory",
+            );
             remove_dir_if_exists(&staging)?;
-            return Err(err);
-        }
-
-        if final_dir.exists() {
-            fs::rename(&final_dir, &old_dir)?;
-        }
-        if let Err(err) = fs::rename(&staging, &final_dir) {
-            if old_dir.exists() {
-                let _ = fs::rename(&old_dir, &final_dir);
+            remove_dir_if_exists(&old_dir)?;
+            fs::create_dir_all(&staging)?;
+            let install_result = (|| -> Result<()> {
+                progress.event(
+                    operation,
+                    "source",
+                    ProgressStatus::Started,
+                    Some(&package.name),
+                    "installing package source",
+                );
+                install_source_with_progress(&self.paths, &package, &staging, operation, progress)?;
+                progress.event(
+                    operation,
+                    "source",
+                    ProgressStatus::Succeeded,
+                    Some(&package.name),
+                    "package source installed",
+                );
+                if !package.source.build_scripts.is_empty() {
+                    build::run_build_scripts_with_progress(
+                        &package.source.build_scripts,
+                        &staging,
+                        operation,
+                        Some(&package.name),
+                        progress,
+                    )?;
+                }
+                Ok(())
+            })();
+            if let Err(err) = install_result {
+                remove_dir_if_exists(&staging)?;
+                return Err(err);
             }
-            return Err(err.into());
-        }
 
-        let mut state = InstalledState::load(&self.paths)?;
-        // Capture previous receipt data before cleaning links, so we can
-        // recreate them on rollback if link creation fails.
-        let previous_receipt = state.packages.get(&package.name).cloned();
-        if let Some(previous) = &previous_receipt {
-            cleanup_package_links(&self.paths, previous)?;
-        }
-        let receipt = match create_package_links(
-            &self.paths,
-            &package.name,
-            &final_dir,
-            &package.bins,
-            &package.share,
-            &package.opt,
-        ) {
-            Ok(receipt) => receipt,
-            Err(err) => {
-                remove_dir_if_exists(&final_dir)?;
+            progress.event(
+                operation,
+                "commit",
+                ProgressStatus::Running,
+                Some(&package.name),
+                "committing package directory",
+            );
+            if final_dir.exists() {
+                fs::rename(&final_dir, &old_dir)?;
+            }
+            if let Err(err) = fs::rename(&staging, &final_dir) {
                 if old_dir.exists() {
                     let _ = fs::rename(&old_dir, &final_dir);
                 }
-                // Recreate previous links if we had them (rollback).
-                if let Some(previous) = &previous_receipt {
-                    let prev_dir = self.paths.package_dir(&previous.name);
-                    if prev_dir.exists() {
-                        let _ = create_package_links(
-                            &self.paths,
-                            &previous.name,
-                            &prev_dir,
-                            &previous.bins,
-                            &previous.share,
-                            &previous.opt,
-                        );
-                    }
-                }
-                return Err(err);
+                return Err(err.into());
             }
-        };
-        if old_dir.exists() {
-            remove_dir_if_exists(&old_dir)?;
+
+            let mut state = InstalledState::load(&self.paths)?;
+            // Capture previous receipt data before cleaning links, so we can
+            // recreate them on rollback if link creation fails.
+            let previous_receipt = state.packages.get(&package.name).cloned();
+            if let Some(previous) = &previous_receipt {
+                progress.event(
+                    operation,
+                    "link",
+                    ProgressStatus::Running,
+                    Some(&package.name),
+                    "cleaning previous package links",
+                );
+                cleanup_package_links(&self.paths, previous)?;
+            }
+            progress.event(
+                operation,
+                "link",
+                ProgressStatus::Running,
+                Some(&package.name),
+                "creating package links",
+            );
+            let receipt = match create_package_links(
+                &self.paths,
+                &package.name,
+                &final_dir,
+                &package.bins,
+                &package.share,
+                &package.opt,
+            ) {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    remove_dir_if_exists(&final_dir)?;
+                    if old_dir.exists() {
+                        let _ = fs::rename(&old_dir, &final_dir);
+                    }
+                    // Recreate previous links if we had them (rollback).
+                    if let Some(previous) = &previous_receipt {
+                        let prev_dir = self.paths.package_dir(&previous.name);
+                        if prev_dir.exists() {
+                            let _ = create_package_links(
+                                &self.paths,
+                                &previous.name,
+                                &prev_dir,
+                                &previous.bins,
+                                &previous.share,
+                                &previous.opt,
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            };
+            if old_dir.exists() {
+                remove_dir_if_exists(&old_dir)?;
+            }
+            let installed = InstalledPackage {
+                name: package.name.clone(),
+                version: package.version.clone(),
+                source_id: package.source.id.clone(),
+                bins: receipt.bins.clone(),
+                share: receipt.share,
+                opt: receipt.opt,
+                installed_at: Utc::now(),
+            };
+            progress.event(
+                operation,
+                "state",
+                ProgressStatus::Running,
+                Some(&package.name),
+                "writing install state",
+            );
+            state.packages.insert(package.name.clone(), installed);
+            state.save(&self.paths)?;
+            Ok(InstallResult {
+                package: package.name,
+                version: package.version,
+                source_id: package.source.id,
+                bins: receipt.bins,
+                package_dir: final_dir,
+            })
+        })();
+        match &result {
+            Ok(_) => progress.event(
+                operation,
+                "package",
+                ProgressStatus::Succeeded,
+                Some(&package_name),
+                "package installed",
+            ),
+            Err(err) => emit_error(progress, operation, "package", Some(&package_name), err),
         }
-        let installed = InstalledPackage {
-            name: package.name.clone(),
-            version: package.version.clone(),
-            source_id: package.source.id.clone(),
-            bins: receipt.bins.clone(),
-            share: receipt.share,
-            opt: receipt.opt,
-            installed_at: Utc::now(),
-        };
-        state.packages.insert(package.name.clone(), installed);
-        state.save(&self.paths)?;
-        Ok(InstallResult {
-            package: package.name,
-            version: package.version,
-            source_id: package.source.id,
-            bins: receipt.bins,
-            package_dir: final_dir,
-        })
+        result
     }
 }
 
@@ -282,13 +533,19 @@ fn parse_package_request(request: &str) -> (&str, Option<String>) {
     }
 }
 
-fn install_source(paths: &MasonPaths, package: &NormalizedPackage, staging: &Path) -> Result<()> {
+fn install_source_with_progress(
+    paths: &MasonPaths,
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
     match package.source.source_type.as_str() {
-        "github" => install_github(paths, package, staging),
-        "generic" => install_generic(paths, package, staging),
-        "openvsx" => install_openvsx(paths, package, staging),
+        "github" => install_github_with_progress(paths, package, staging, operation, progress),
+        "generic" => install_generic_with_progress(paths, package, staging, operation, progress),
+        "openvsx" => install_openvsx_with_progress(paths, package, staging, operation, progress),
         ty if manager::manager_for_source_type(ty).is_some() => {
-            install_with_manager(package, staging)
+            install_with_manager_with_progress(package, staging, operation, progress)
         }
         other => Err(msg(format!(
             "unsupported package source type '{other}' for {}",
@@ -297,7 +554,13 @@ fn install_source(paths: &MasonPaths, package: &NormalizedPackage, staging: &Pat
     }
 }
 
-fn install_github(paths: &MasonPaths, package: &NormalizedPackage, staging: &Path) -> Result<()> {
+fn install_github_with_progress(
+    paths: &MasonPaths,
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
     let asset = package.source.asset.as_ref().ok_or_else(|| {
         msg(format!(
             "github package {} has no selected asset",
@@ -320,11 +583,30 @@ fn install_github(paths: &MasonPaths, package: &NormalizedPackage, staging: &Pat
     } else {
         github::release_asset_url(&package.source, file)?
     };
-    let downloaded = download_to_cache(&locator, &paths.downloads_dir)?;
-    unpack_or_copy(&downloaded, staging, strip_prefix)
+    let downloaded = download_to_cache_with_progress(
+        &locator,
+        &paths.downloads_dir,
+        operation,
+        Some(&package.name),
+        progress,
+    )?;
+    unpack_or_copy_with_progress(
+        &downloaded,
+        staging,
+        strip_prefix,
+        operation,
+        Some(&package.name),
+        progress,
+    )
 }
 
-fn install_generic(paths: &MasonPaths, package: &NormalizedPackage, staging: &Path) -> Result<()> {
+fn install_generic_with_progress(
+    paths: &MasonPaths,
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
     let file = package
         .source
         .asset
@@ -332,11 +614,30 @@ fn install_generic(paths: &MasonPaths, package: &NormalizedPackage, staging: &Pa
         .and_then(|a| a.file.as_deref());
     let locator = generic::asset_locator(&package.source, file)?;
     let (locator, strip_prefix) = split_archive_spec(&locator);
-    let downloaded = download_to_cache(locator, &paths.downloads_dir)?;
-    unpack_or_copy(&downloaded, staging, strip_prefix)
+    let downloaded = download_to_cache_with_progress(
+        locator,
+        &paths.downloads_dir,
+        operation,
+        Some(&package.name),
+        progress,
+    )?;
+    unpack_or_copy_with_progress(
+        &downloaded,
+        staging,
+        strip_prefix,
+        operation,
+        Some(&package.name),
+        progress,
+    )
 }
 
-fn install_openvsx(paths: &MasonPaths, package: &NormalizedPackage, staging: &Path) -> Result<()> {
+fn install_openvsx_with_progress(
+    paths: &MasonPaths,
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
     let locator = package
         .source
         .asset
@@ -345,14 +646,68 @@ fn install_openvsx(paths: &MasonPaths, package: &NormalizedPackage, staging: &Pa
         .map(str::to_owned)
         .unwrap_or(openvsx::vsix_url(&package.source)?);
     let (locator, strip_prefix) = split_archive_spec(&locator);
-    let downloaded = download_to_cache(locator, &paths.downloads_dir)?;
-    unpack_or_copy(&downloaded, staging, strip_prefix)
+    let downloaded = download_to_cache_with_progress(
+        locator,
+        &paths.downloads_dir,
+        operation,
+        Some(&package.name),
+        progress,
+    )?;
+    unpack_or_copy_with_progress(
+        &downloaded,
+        staging,
+        strip_prefix,
+        operation,
+        Some(&package.name),
+        progress,
+    )
 }
 
-fn install_with_manager(package: &NormalizedPackage, staging: &Path) -> Result<()> {
+fn install_with_manager_with_progress(
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
+    progress.event(
+        operation,
+        "manager",
+        ProgressStatus::Started,
+        Some(&package.name),
+        "checking external package manager",
+    );
     manager::ensure_manager(&package.source.source_type)?;
     let spec = manager::build_install_command(&package.source, staging)?;
-    manager::run_install_command(&spec)
+    manager::run_install_command_with_progress(&spec, operation, Some(&package.name), progress)
+}
+
+fn unpack_or_copy_with_progress(
+    path: &Path,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+    operation: &str,
+    package: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
+    progress.event(
+        operation,
+        "unpack",
+        ProgressStatus::Started,
+        package,
+        "unpacking package source",
+    );
+    let result = unpack_or_copy(path, dest, strip_prefix);
+    match &result {
+        Ok(()) => progress.event(
+            operation,
+            "unpack",
+            ProgressStatus::Succeeded,
+            package,
+            "package source unpacked",
+        ),
+        Err(err) => emit_error(progress, operation, "unpack", package, err),
+    }
+    result
 }
 
 fn remove_dir_if_exists(path: &Path) -> Result<()> {
@@ -508,7 +863,10 @@ bin:
             neovim_lspconfig: None,
         };
         let installer = Installer::new(paths, Platform::new("linux", "x64", Some("gnu")));
-        let err = installer.install_normalized(package, false).unwrap_err();
+        let progress = NoProgressSink;
+        let err = installer
+            .install_normalized_with_progress("install", package, false, &progress)
+            .unwrap_err();
         assert!(matches!(err, M4aError::BuildScriptsDisabled { .. }));
     }
 
@@ -544,7 +902,9 @@ bin:
             neovim_lspconfig: None,
         };
         if !manager::command_exists("opam") {
-            let err = install_with_manager(&package, &staging).unwrap_err();
+            let progress = NoProgressSink;
+            let err = install_with_manager_with_progress(&package, &staging, "install", &progress)
+                .unwrap_err();
             assert!(
                 matches!(err, M4aError::MissingManager { source_type, .. } if source_type == "opam")
             );

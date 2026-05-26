@@ -1,4 +1,5 @@
 use crate::package_spec::NormalizedSource;
+use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
 use crate::types::{M4aError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -137,19 +138,50 @@ pub fn build_install_command(source: &NormalizedSource, staging: &Path) -> Resul
 }
 
 pub fn run_install_command(spec: &CommandSpec) -> Result<()> {
-    let output = Command::new(&spec.program)
+    let progress = NoProgressSink;
+    run_install_command_with_progress(spec, "install", None, &progress)
+}
+
+pub fn run_install_command_with_progress(
+    spec: &CommandSpec,
+    operation: &str,
+    package: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
+    progress.event(
+        operation,
+        "manager",
+        ProgressStatus::Started,
+        package,
+        "running external package manager",
+    );
+    let result = Command::new(&spec.program)
         .args(&spec.args)
         .envs(&spec.env)
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(M4aError::CommandFailed {
-            program: spec.program.clone(),
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        .output()
+        .map_err(M4aError::from)
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(M4aError::CommandFailed {
+                    program: spec.program.clone(),
+                    status: output.status.code().unwrap_or(-1),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            }
+        });
+    match &result {
+        Ok(()) => progress.event(
+            operation,
+            "manager",
+            ProgressStatus::Succeeded,
+            package,
+            "external package manager completed",
+        ),
+        Err(err) => emit_error(progress, operation, "manager", package, err),
     }
+    result
 }
 
 fn package_with_version(source: &NormalizedSource, sep: &str) -> String {
