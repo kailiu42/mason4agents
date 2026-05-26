@@ -103,9 +103,9 @@ mason4agents uninstall stylua
 /mason
 ```
 
-Panel 会以匹配宿主宽度、跟随宿主 theme 的 TUI 打开，顶部展示可见 tabs（`list`、`suggested`、`installed`、`check update`、`refresh`、`doctor`），下方是自适应宽度的表格区域。`suggested` tab 会扫描本地项目，LSP 推荐优先使用 OMP 内置默认支持列表；如果某个语言不在 OMP 默认列表中，再退回到本地缓存的 LazyVim curated 建议。表格视图会直接显示 installed 状态，保留整行高亮的当前选中行，并支持 `Tab`/`←`/`→` 切换 tab、`/` 本地过滤、`↑`/`↓` 选择行、`Enter` 打开原位包详情弹窗，以及按安装状态变化的包操作：未安装包使用 `i`，已安装包使用 `u`/`r`。耗时操作（`install`、`update`、`uninstall`、`refresh`）会显示模态 progress panel；CLI 运行期间会屏蔽其它 Mason 操作，30s 无新进展后进入可用 `q`/`Esc` 关闭 panel 的提示态，关闭不会杀掉 CLI，最终结果会保留在该 panel 中。
+Panel 会以匹配宿主宽度、跟随宿主 theme 的 TUI 打开，顶部展示可见 tabs（`list`、`suggested`、`installed`、`check update`、`refresh`、`doctor`），下方是自适应宽度的表格区域。`suggested` tab 会扫描本地项目，LSP 推荐优先使用 OMP 内置默认支持列表；如果某个语言不在 OMP 默认列表中，再退回到本地缓存的 LazyVim curated 建议。表格视图会直接显示 installed 状态，保留整行高亮的当前选中行，并支持 `Tab`/`←`/`→` 切换 tab、`/` 本地过滤、`↑`/`↓` 选择行、`Enter` 打开原位包详情弹窗，以及按安装状态变化的包操作：未安装包使用 `i`，已安装包使用 `u`/`d`。耗时操作（`install`、`update`、`uninstall`、`refresh`）会显示模态 progress panel；CLI 运行期间会屏蔽其它 Mason 操作，30s 无新进展后进入可用 `q`/`Esc` 关闭 panel 的提示态，关闭不会杀掉 CLI，最终结果会保留在该 panel 中。
 
-不需要打开 panel 时，可直接运行等价 CLI 的 slash 子命令：
+不需要打开 panel 时，可直接运行等价 CLI 的 slash 子命令。无参数 `/mason` 会打开 TUI；在仅有 `/mason ` 的提示后按 `Tab` 会显示全部子命令，输入前缀后会收窄子命令建议，并在回车前展示对应命令可传入的参数形状：
 
 ```text
 /mason search stylua --language Lua
