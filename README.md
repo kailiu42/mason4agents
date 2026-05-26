@@ -104,7 +104,7 @@ Open the interactive package manager in Pi:
 /mason
 ```
 
-The panel opens as a host-width, theme-aware TUI with command tabs at the top (`search`, `list`, `installed`, `install`, `uninstall`, `update`, `which`, `refresh`, `doctor`, `env`, `bin-dir`) and a width-aware table area below. Table views show installed status directly, keep a highlighted current row, and support `Tab`/`←`/`→` to switch commands, `/` local filtering, `↑`/`↓` row selection, `Enter` for an in-place package detail popup, `i` install, `u` update, `r` uninstall, `e` to edit the active command input, and `l` to edit the `search --language` filter.
+The panel opens as a host-width, theme-aware TUI with visible tabs at the top (`list`, `suggested`, `installed`, `check update`, `refresh`, `doctor`) and a width-aware table area below. The `suggested` tab scans the local project, prefers OMP built-in LSP defaults as its LSP recommendation source, and falls back to locally cached LazyVim curated suggestions for languages OMP does not cover. Table views show installed status directly, keep a highlighted current row, and support `Tab`/`←`/`→` to switch tabs, `/` local filtering, `↑`/`↓` row selection, `Enter` for an in-place package detail popup, and state-aware package actions: `i` for missing packages, `u`/`r` for installed packages.
 
 Run CLI-equivalent slash subcommands directly when you do not need the panel:
 
@@ -115,6 +115,7 @@ Run CLI-equivalent slash subcommands directly when you do not need the panel:
 /mason install stylua
 /mason uninstall stylua
 /mason doctor
+/mason register --omp
 /mason-doctor
 ```
 
@@ -145,9 +146,11 @@ mason4agents which <executable>
 mason4agents bin-dir
 mason4agents env --shell bash|zsh|fish|powershell|cmd|json
 mason4agents doctor
+mason4agents register --omp
 ```
 
 By default, all commands output human-readable text. Add `--json` for structured JSON output wrapped in `{"ok": true, "data": ...}`.
+Package-changing commands run through the Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` to register already-installed Mason LSP tools with Oh My Pi manually.
 
 Example text output:
 
