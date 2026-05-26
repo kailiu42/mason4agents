@@ -223,7 +223,7 @@ describe("Mason TUI core", () => {
     expect(detail).toContain("Package: stylua");
     expect(detail).toContain("[i]: install");
     expect(detail).not.toContain("[u]: update");
-    expect(detail).not.toContain("[r]: uninstall");
+    expect(detail).not.toContain("[d]: uninstall");
     await tui.handleInput("\x1b[27u");
     expect(tui.state.view).toBe("list");
     expect(tui.render()).not.toContain("package details");
@@ -284,7 +284,7 @@ describe("Mason TUI core", () => {
     await tui.handleInput("down");
     await tui.handleInput("u");
     await tui.handleInput("q");
-    await tui.handleInput("r");
+    await tui.handleInput("d");
     await tui.handleInput("q");
 
     expect(calls).toContainEqual(["install", "stylua"]);
@@ -535,7 +535,7 @@ describe("Mason TUI core", () => {
     const installedRender = tui.render();
     expect(installedRender).toContain("▶ ✓");
     expect(installedRender).toContain("[u]: update");
-    expect(installedRender).toContain("[r]: uninstall");
+    expect(installedRender).toContain("[d]: uninstall");
     expect(installedRender).not.toContain("[i]: install");
 
     const styled = tui.renderLines(96, {
@@ -564,7 +564,7 @@ describe("Mason TUI core", () => {
     expect(calls).toContainEqual(["suggested"]);
     await tui.handleInput("right");
     expect(tui.state.command).toBe("installed");
-    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [Enter]: detail │ [u]: update │ [r]: uninstall");
+    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [Enter]: detail │ [u]: update │ [d]: uninstall");
     expect(tui.render()).not.toContain("[l]: lang");
     await tui.handleInput("right");
     expect(tui.state.command).toBe("update");

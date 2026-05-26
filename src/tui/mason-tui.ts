@@ -1340,11 +1340,18 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
     await runPackageCommand(state, host, runWithProgress, ["update", name], name);
     return;
   }
+  if (key === "d" || key === "D") {
+    if (!installed) {
+      setNotice(state, host, `${name} is not installed.`, "error");
+      return;
+    }
+    await runPackageCommand(state, host, runWithProgress, ["uninstall", name], name);
+    return;
+  }
   if (!installed) {
     setNotice(state, host, `${name} is not installed.`, "error");
     return;
   }
-  await runPackageCommand(state, host, runWithProgress, ["uninstall", name], name);
 }
 
 async function runPackageCommand(
@@ -1521,7 +1528,7 @@ function packageOperationActions(state: MasonTuiState): ShortcutAction[] {
   const selected = selectedEntryWithoutSync(state);
   if (!selected || !packageNameFromItemOrRow(selected.item, selected.row)) return [];
   const item = recordValue(selected.item);
-  return isInstalledPackage(state, item) ? [["[u]", "update"], ["[r]", "uninstall"]] : [["[i]", "install"]];
+  return isInstalledPackage(state, item) ? [["[u]", "update"], ["[d]", "uninstall"]] : [["[i]", "install"]];
 }
 
 function browseHelpActions(state: MasonTuiState, width: number): ShortcutAction[] {
@@ -1575,7 +1582,7 @@ function packageStatusForDetail(state: MasonTuiState, item: Record<string, unkno
 
 function isPackageActionKey(key: string): boolean {
   const normalized = key.toLocaleLowerCase();
-  return normalized === "i" || normalized === "u" || normalized === "r";
+  return normalized === "i" || normalized === "u" || normalized === "d";
 }
 
 function isQuitKey(key: string): boolean {
