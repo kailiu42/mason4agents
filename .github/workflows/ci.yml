@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -69,14 +69,14 @@ jobs:
             runner: macos-15
             artifact: mason4agents-darwin-arm64
           - key: win32-x64
-            runner: windows-2025
+            runner: windows-2025-vs2026
             artifact: mason4agents-win32-x64.exe
           - key: win32-arm64
             runner: windows-11-arm
             artifact: mason4agents-win32-arm64.exe
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -103,7 +103,7 @@ jobs:
         run: bun scripts/publish.mjs --copy-local-native --platform "${{ matrix.key }}"
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: native/${{ matrix.artifact }}
