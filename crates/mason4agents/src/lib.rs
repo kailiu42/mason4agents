@@ -12,6 +12,7 @@ pub mod platform;
 pub mod purl;
 pub mod registry;
 pub mod store;
+pub mod suggestions;
 pub mod types;
 
 pub use types::{M4aError, Result};

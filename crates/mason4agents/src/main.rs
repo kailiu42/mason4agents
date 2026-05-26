@@ -7,10 +7,12 @@ use mason4agents::registry::{
     load_or_refresh, refresh_registry, search_packages, PackageSummary, RefreshSummary,
 };
 use mason4agents::store::{InstalledPackage, InstalledState};
+use mason4agents::suggestions::{suggest_packages, SuggestionItem, SuggestionOptions};
 use mason4agents::types::{error_json, success_json, M4aError, Result};
 use serde::Serialize;
 use serde_json::json;
 use std::fmt::Write as FmtWrite;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
@@ -48,6 +50,17 @@ enum Command {
         outdated: bool,
         #[arg(long)]
         registry: Option<String>,
+    },
+    #[command(hide = true)]
+    Suggested {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        registry: Option<String>,
+        #[arg(long)]
+        refresh_suggestions: bool,
+        #[arg(long, hide = true)]
+        suggestions_source: Option<String>,
     },
     Install {
         packages: Vec<String>,
@@ -202,6 +215,31 @@ fn run(cli: Cli) -> Result<Output> {
                 Ok(format_package_list(&list))
             }
         }
+        Command::Suggested {
+            path,
+            registry,
+            refresh_suggestions,
+            suggestions_source,
+        } => {
+            let cache = load_or_refresh(&paths, registry.as_deref())?;
+            let state = InstalledState::load(&paths)?;
+            let project_path = match path {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let list = suggest_packages(
+                &paths,
+                &cache,
+                &state,
+                &platform,
+                SuggestionOptions {
+                    project_path: &project_path,
+                    refresh_curated: refresh_suggestions,
+                    curated_source: suggestions_source.as_deref(),
+                },
+            )?;
+            Ok(format_suggestion_list(&list))
+        }
         Command::Install {
             packages,
             registry,
@@ -306,6 +344,34 @@ fn format_package_list(list: &[PackageSummary]) -> Output {
         );
     }
     // Trim trailing newline
+    let text = text.trim_end().to_owned();
+    Output::new(list, text)
+}
+fn format_suggestion_list(list: &[SuggestionItem]) -> Output {
+    if list.is_empty() {
+        return Output::new(list, "No suggested packages found.".to_owned());
+    }
+    let mut text = String::new();
+    for item in list {
+        let pkg = &item.package;
+        let status = if pkg.installed {
+            if pkg.outdated {
+                "outdated"
+            } else {
+                "installed"
+            }
+        } else {
+            "suggested"
+        };
+        let _ = writeln!(
+            text,
+            " {:<9}  {} {}  {}",
+            status,
+            pkg.name,
+            pkg.version.as_deref().unwrap_or("-"),
+            item.reason
+        );
+    }
     let text = text.trim_end().to_owned();
     Output::new(list, text)
 }
