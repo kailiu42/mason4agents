@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mason4agents/mason4agents.git"
+    "url": "git+https://github.com/kailiu42/mason4agents.git"
   },
   "bin": {
     "mason4agents": "dist/bin/mason4agents.js"
@@ -31,17 +31,18 @@
   "files": [
     "dist/bin/mason4agents.js",
     "dist/pi/extension.js",
-    "native/mason4agents-*",
     "package.json"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "verify": "bun run typecheck && cargo test && bun test",
-    "build": "bun build src/bin/mason4agents.ts --outdir dist/bin --target bun && bun build src/pi/extension.ts --outdir dist/pi --target bun && cargo build --release && mkdir -p native && exe=$(node -e 'console.log(process.platform === \"win32\" ? \".exe\" : \"\")') && src=$(echo target/release/mason4agents$exe) && dst=$(echo native/mason4agents-$(node -e 'console.log(process.platform + \"-\" + process.arch)')$exe) && cp \"$src\" \"$dst\"",
+    "build:js": "bun build src/bin/mason4agents.ts --outdir dist/bin --target bun && bun build src/pi/extension.ts --outdir dist/pi --target bun",
+    "build:native": "cargo build --release && bun scripts/publish.mjs --copy-local-native",
+    "build": "bun run build:js && bun run build:native",
     "test": "bun test",
-    "pack:local": "node scripts/publish.mjs --pack",
-    "publish:local": "node scripts/publish.mjs --pack",
-    "publish:npm": "node scripts/publish.mjs"
+    "pack:local": "bun run build && bun scripts/publish.mjs --pack --platform current",
+    "publish:local": "bun run pack:local",
+    "publish:npm": "bun scripts/publish.mjs"
   },
   "devDependencies": {
     "@types/bun": "latest",

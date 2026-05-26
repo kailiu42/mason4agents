@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 
 export interface BinaryResolution {
   path: string;
-  source: "env" | "bundled" | "development";
+  source: "env" | "bundled" | "native-package" | "development";
+}
+
+export interface NativePackageResolution {
+  name: string;
+  executable: string;
 }
 
 export function resolveMasonBinary(env: NodeJS.ProcessEnv = process.env, startUrl: string = import.meta.url): string {
@@ -38,6 +43,17 @@ export function resolveMasonBinaryDetailed(env: NodeJS.ProcessEnv = process.env,
       }
     }
   }
+
+  const nativePackage = nativePackageForRuntime();
+  if (nativePackage) {
+    for (const candidate of nativePackageCandidates(roots, nativePackage)) {
+      checked.push(candidate);
+      if (existsSync(candidate) && isExecutable(candidate, true)) {
+        return { path: candidate, source: "native-package" };
+      }
+    }
+  }
+
   for (const root of roots) {
     for (const candidate of developmentCandidates(root)) {
       checked.push(candidate);
@@ -46,7 +62,26 @@ export function resolveMasonBinaryDetailed(env: NodeJS.ProcessEnv = process.env,
       }
     }
   }
-  throw new Error(`Unable to locate mason4agents native binary. Reinstall the plugin, set MASON4AGENTS_BIN to the Rust binary, or build crates/mason4agents. Checked ${checked.length} locations under: ${roots.join(", ")}`);
+  throw new Error(
+    `Unable to locate mason4agents native binary. Reinstall the plugin, set MASON4AGENTS_BIN to the Rust binary, or build crates/mason4agents. Checked ${checked.length} locations:\n${checked.map((candidate) => `  - ${candidate}`).join("\n")}\nSearch roots: ${roots.join(", ")}`,
+  );
+}
+
+export function nativePackageForRuntime(platform: NodeJS.Platform = process.platform, arch: string = process.arch): NativePackageResolution | undefined {
+  const normalizedArch = normalizeArch(arch);
+  const executable = platform === "win32" ? "mason4agents.exe" : "mason4agents";
+  if (platform === "linux") {
+    if (normalizedArch === "x64" || normalizedArch === "arm64") {
+      return { name: `mason4agents-linux-${normalizedArch}-gnu`, executable };
+    }
+    return undefined;
+  }
+  if (platform === "darwin" || platform === "win32") {
+    if (normalizedArch === "x64" || normalizedArch === "arm64") {
+      return { name: `mason4agents-${platform}-${normalizedArch}`, executable };
+    }
+  }
+  return undefined;
 }
 
 function isExecutable(filePath: string, repairMode = false): boolean {
@@ -73,12 +108,11 @@ function isExecutable(filePath: string, repairMode = false): boolean {
   }
 }
 
-
 function binarySearchRoots(startUrl: string): string[] {
   const roots: string[] = [];
   pushUnique(roots, packageRoot(startUrl));
   for (const dir of ancestorDirs(startUrl)) pushUnique(roots, dir);
-  const selfRoot = packageRootFromSelfReference();
+  const selfRoot = packageRootFromPackageReference("mason4agents");
   if (selfRoot) pushUnique(roots, selfRoot);
   return roots;
 }
@@ -101,11 +135,11 @@ function pushUnique(values: string[], value: string): void {
   if (!values.includes(value)) values.push(value);
 }
 
-function packageRootFromSelfReference(): string | undefined {
+function packageRootFromPackageReference(packageName: string): string | undefined {
   const resolver = (import.meta as ImportMeta & { resolve?: (specifier: string) => string }).resolve;
   if (typeof resolver !== "function") return undefined;
   try {
-    return dirname(fileURLToPath(resolver("mason4agents/package.json")));
+    return dirname(fileURLToPath(resolver(`${packageName}/package.json`)));
   } catch {
     return undefined;
   }
@@ -156,6 +190,16 @@ function bundledCandidates(root: string): string[] {
   return candidates;
 }
 
+function nativePackageCandidates(roots: readonly string[], nativePackage: NativePackageResolution): string[] {
+  const candidates: string[] = [];
+  const resolvedPackageRoot = packageRootFromPackageReference(nativePackage.name);
+  if (resolvedPackageRoot) pushUnique(candidates, join(resolvedPackageRoot, "bin", nativePackage.executable));
+  for (const root of roots) {
+    pushUnique(candidates, join(root, "node_modules", nativePackage.name, "bin", nativePackage.executable));
+    pushUnique(candidates, join(dirname(root), nativePackage.name, "bin", nativePackage.executable));
+  }
+  return candidates;
+}
 
 function developmentCandidates(root: string): string[] {
   const exe = process.platform === "win32" ? ".exe" : "";
@@ -163,10 +207,9 @@ function developmentCandidates(root: string): string[] {
     join(root, "target", "debug", "mason4agents" + exe),
     join(root, "target", "release", "mason4agents" + exe),
     join(root, "..", "target", "debug", "mason4agents" + exe),
-    join(root, "..", "target", "release", "mason4agents" + exe)
+    join(root, "..", "target", "release", "mason4agents" + exe),
   ];
 }
-
 
 function normalizeArch(arch: string): string {
   if (arch === "x64") return "x64";

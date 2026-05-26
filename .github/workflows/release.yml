@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require tag ref
+        if: github.ref_type != 'tag'
+        run: |
+          echo "Release workflow must run from a tag ref."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test
+
+      - name: TypeScript typecheck
+        run: ./node_modules/.bin/tsc --noEmit
+
+      - name: Bun tests
+        run: bun test
+
+      - name: Build JS and current native binary
+        run: bun run build
+
+  native-build:
+    name: Native build (${{ matrix.key }})
+    needs: quality
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: linux-x64-gnu
+            runner: ubuntu-24.04
+            artifact: mason4agents-linux-x64-gnu
+          - key: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            artifact: mason4agents-linux-arm64-gnu
+          - key: darwin-x64
+            runner: macos-15-intel
+            artifact: mason4agents-darwin-x64
+          - key: darwin-arm64
+            runner: macos-15
+            artifact: mason4agents-darwin-arm64
+          - key: win32-x64
+            runner: windows-2025
+            artifact: mason4agents-win32-x64.exe
+          - key: win32-arm64
+            runner: windows-11-arm
+            artifact: mason4agents-win32-arm64.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build Rust CLI
+        run: cargo build --release
+
+      - name: Smoke test CLI version
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./target/release/mason4agents.exe --version
+          else
+            ./target/release/mason4agents --version
+          fi
+
+      - name: Stage native artifact
+        run: bun scripts/publish.mjs --copy-local-native --platform "${{ matrix.key }}"
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: native/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish npm packages
+    needs: native-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
+      - name: Install npm with trusted publishing support
+        run: npm install -g npm@11
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Build JS package entries
+        run: bun run build:js
+
+      - name: Publish native packages then root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          fi
+          bun scripts/publish.mjs --artifacts release-artifacts --provenance

@@ -71,8 +71,9 @@ pi --offline -e dist/pi/extension.js
 npm shim 和 OMP/Pi 扩展按以下顺序定位 Rust 二进制文件：
 
 1. `MASON4AGENTS_BIN` 环境变量
-2. 内置的 `native/mason4agents-{platform}-{arch}`（由 `bun run build` 构建）
-3. 开发目录 `target/debug/mason4agents`（`cargo build` 后）
+2. 内置的 `native/mason4agents-{platform}-{arch}` 或 `dist/native/...`（本地/源码构建和旧包）
+3. 已安装的 native optional dependency 包，例如 `mason4agents-linux-x64-gnu`
+4. 开发目录 `target/debug/mason4agents` / `target/release/mason4agents`（`cargo build` 后）
 
 ## 快速开始
 
@@ -199,10 +200,10 @@ bun run build
 ```
 
 此命令依次执行：
-1. `bun build` 打包 TypeScript npm shim（`dist/bin/mason4agents.js`）
-2. `bun build` 打包 OMP/Pi 扩展（`dist/pi/extension.js`）
-3. `cargo build --release` 编译 Rust CLI
-4. 将 release 二进制复制到 `native/mason4agents-{platform}-{arch}`
+
+1. `bun run build:js` 打包 TypeScript npm shim（`dist/bin/mason4agents.js`）和 OMP/Pi 扩展（`dist/pi/extension.js`）
+2. `bun run build:native` 运行 `cargo build --release`
+3. 将当前平台 release 二进制复制到 `native/`，用于本地 resolver fallback 和 native package staging
 
 ### 单独构建各组件
 
@@ -211,9 +212,11 @@ bun run build
 cargo build --release                          # 二进制: target/release/mason4agents
 cargo build                                    # 调试二进制: target/debug/mason4agents
 
-# 仅 OMP/Pi 扩展（TypeScript 打包）
-./node_modules/.bin/tsc --noEmit               # 类型检查
-bun build src/pi/extension.ts --outdir dist/pi --target bun
+# 仅 JS 入口
+bun run build:js
+
+# Rust CLI 加当前平台 native/ staging copy
+bun run build:native
 ```
 
 ### 构建产物
@@ -222,24 +225,32 @@ bun build src/pi/extension.ts --outdir dist/pi --target bun
 |---|---|---|
 | Rust CLI | `target/release/mason4agents` | 直接命令行使用 |
 | Rust CLI (开发) | `target/debug/mason4agents` | OMP/Pi 扩展开发回退 |
-| 原生二进制 | `native/mason4agents-{platform}-{arch}` | OMP/Pi 扩展内置查找 |
+| 本地 native 二进制 | `native/mason4agents-{platform}-{arch}` | 内置/本地 resolver fallback |
+| 发布 native artifact | `native/mason4agents-linux-x64-gnu`、`native/mason4agents-win32-x64.exe` 等 | 平台专属 npm native 包 |
 | npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
 | OMP/Pi 扩展 | `dist/pi/extension.js` | `omp --extension ./dist/pi/extension.js` / `pi --offline -e dist/pi/extension.js` |
 
-### 打包并发布当前平台
+### 打包、CI 与发布
 
 ```bash
-# 构建本地 tarball，用于安装测试
-bun run publish:local
-
-# 同一本地 tarball 流程的别名
+# 构建当前平台 tarball，用于本地安装测试
 bun run pack:local
 
-# 真正发布到 npm
+# 同一本地 tarball 流程的别名
+bun run publish:local
+
+# 从预构建的多平台 artifacts 发布（通常只在 GitHub release CI 中执行）
 bun run publish:npm
 ```
 
-这些命令会把当前平台二进制打包为 `native/mason4agents-{platform}-{arch}`。如果要发布多平台 npm 包，请先补齐其它 `native/mason4agents-*` 二进制，再执行发布命令。
+发布到 npm 时采用小型主包 `mason4agents` 加平台 native optional dependencies 的结构：`mason4agents-linux-x64-gnu`、`mason4agents-linux-arm64-gnu`、`mason4agents-darwin-x64`、`mason4agents-darwin-arm64`、`mason4agents-win32-x64`、`mason4agents-win32-arm64`。native 包只包含 `package.json`、`LICENSE`、`bin/mason4agents` 或 `bin/mason4agents.exe`，且不声明自己的 `bin` 字段。
+
+GitHub Actions 包含两个 workflow：
+
+- `ci.yml` 在分支 push 和 pull request 上运行。它执行 Rust/TypeScript/Bun 质量门，并在 Linux、macOS、Windows 的 x64 与 arm64 runner 上构建和 smoke-test CLI artifacts。
+- `release.yml` 在 `v*` tag 上运行。它从 tag 重新构建，上传六个平台 native artifacts，生成 npm staging 包，校验 `npm pack --dry-run --json` 内容，先发布所有 native 包，再发布主包。
+
+tag release 应使用 `vX.Y.Z`，且 tag 必须匹配 `package.json` 版本。六个 native 子包首次发布需要 npm bootstrap（本地登录或临时 `NPM_TOKEN`），因为 npm Trusted Publishing 只能为已经存在的包配置。bootstrap 后，为 `mason4agents` 和六个 native 包配置指向 `.github/workflows/release.yml` 的 Trusted Publishing，然后移除临时 token。
 
 ## 测试
 

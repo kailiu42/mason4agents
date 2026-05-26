@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
-import { resolveMasonBinaryDetailed } from "../../src/pi/binary";
+import { nativePackageForRuntime, resolveMasonBinaryDetailed } from "../../src/pi/binary";
 import { ensureMasonBinOnPath, masonDataDir } from "../../src/pi/path-env";
 
 const roots: string[] = [];
@@ -68,6 +68,29 @@ describe("binary resolver", () => {
     const resolved = resolveMasonBinaryDetailed({}, start);
     expect(resolved).toEqual({ path: bundled, source: "bundled" });
     expect(statSync(bundled).mode & 0o111).not.toBe(0);
+  });
+
+  test("uses native optional dependency before development fallback", () => {
+    const nativePackage = nativePackageForRuntime();
+    if (!nativePackage) throw new Error(`Unsupported test platform: ${process.platform}/${process.arch}`);
+
+    const root = tempRoot();
+    writeFileSync(join(root, "package.json"), "{}");
+    const nativeBin = join(root, "node_modules", nativePackage.name, "bin", nativePackage.executable);
+    const dev = join(root, "target", "debug", process.platform === "win32" ? "mason4agents.exe" : "mason4agents");
+    touchExecutable(nativeBin);
+    touchExecutable(dev);
+
+    const start = pathToFileURL(join(root, "dist", "pi", "extension.js")).href;
+    const resolved = resolveMasonBinaryDetailed({}, start);
+    expect(resolved).toEqual({ path: nativeBin, source: "native-package" });
+  });
+
+  test("maps native optional dependency names for supported release platforms", () => {
+    expect(nativePackageForRuntime("linux", "x64")).toEqual({ name: "mason4agents-linux-x64-gnu", executable: "mason4agents" });
+    expect(nativePackageForRuntime("linux", "arm64")).toEqual({ name: "mason4agents-linux-arm64-gnu", executable: "mason4agents" });
+    expect(nativePackageForRuntime("darwin", "arm64")).toEqual({ name: "mason4agents-darwin-arm64", executable: "mason4agents" });
+    expect(nativePackageForRuntime("win32", "x64")).toEqual({ name: "mason4agents-win32-x64", executable: "mason4agents.exe" });
   });
 
   test("falls back to cargo target in development", () => {

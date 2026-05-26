@@ -72,8 +72,9 @@ pi --offline -e dist/pi/extension.js
 The npm shim and OMP/Pi extension locate the Rust binary by checking (in order):
 
 1. `MASON4AGENTS_BIN` environment variable
-2. Bundled `native/mason4agents-{platform}-{arch}` (built by `bun run build`)
-3. Development `target/debug/mason4agents` (after `cargo build`)
+2. Bundled `native/mason4agents-{platform}-{arch}` or `dist/native/...` (local/source builds and old packages)
+3. Installed native optional dependency package, for example `mason4agents-linux-x64-gnu`
+4. Development `target/debug/mason4agents` / `target/release/mason4agents` (after `cargo build`)
 
 ## Quick Start
 
@@ -200,10 +201,10 @@ bun run build
 ```
 
 This runs:
-1. `bun build` to bundle the TypeScript npm shim (`dist/bin/mason4agents.js`)
-2. `bun build` to bundle the OMP/Pi extension (`dist/pi/extension.js`)
-3. `cargo build --release` to compile the Rust CLI
-4. Copies the release binary to `native/mason4agents-{platform}-{arch}`
+
+1. `bun run build:js` to bundle the TypeScript npm shim (`dist/bin/mason4agents.js`) and OMP/Pi extension (`dist/pi/extension.js`)
+2. `bun run build:native` to run `cargo build --release`
+3. Copies the current-platform release binary into `native/` for local resolver fallback and native-package staging
 
 ### Build components separately
 
@@ -212,9 +213,11 @@ This runs:
 cargo build --release                          # binary: target/release/mason4agents
 cargo build                                    # debug binary: target/debug/mason4agents
 
-# OMP/Pi extension only (TypeScript bundle)
-./node_modules/.bin/tsc --noEmit               # typecheck
-bun build src/pi/extension.ts --outdir dist/pi --target bun
+# JS entries only
+bun run build:js
+
+# Rust CLI plus native/ staging copy for the current platform
+bun run build:native
 ```
 
 ### Output artifacts
@@ -223,24 +226,32 @@ bun build src/pi/extension.ts --outdir dist/pi --target bun
 |---|---|---|
 | Rust CLI | `target/release/mason4agents` | Direct shell usage |
 | Rust CLI (dev) | `target/debug/mason4agents` | OMP/Pi extension dev fallback |
-| Native binary | `native/mason4agents-{platform}-{arch}` | Bundled OMP/Pi extension lookup |
+| Local native binary | `native/mason4agents-{platform}-{arch}` | Bundled/local resolver fallback |
+| Release native artifact | `native/mason4agents-linux-x64-gnu`, `native/mason4agents-win32-x64.exe`, etc. | Platform-specific npm native packages |
 | npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
 | OMP/Pi extension | `dist/pi/extension.js` | `omp --extension ./dist/pi/extension.js` / `pi --offline -e dist/pi/extension.js` |
 
-### Package and publish the current platform
+### Package, CI, and publish
 
 ```bash
-# Build a local tarball for install testing
-bun run publish:local
-
-# Alias for the same local tarball flow
+# Build current-platform tarballs for local install testing
 bun run pack:local
 
-# Real npm publish
+# Alias for the same local tarball flow
+bun run publish:local
+
+# Publish from prebuilt multi-platform artifacts (normally only in GitHub release CI)
 bun run publish:npm
 ```
 
-These commands package the current platform binary as `native/mason4agents-{platform}-{arch}`. For a multi-platform npm package, add the other `native/mason4agents-*` binaries before running the publish command.
+The published npm layout uses a small root package (`mason4agents`) plus platform native optional dependencies: `mason4agents-linux-x64-gnu`, `mason4agents-linux-arm64-gnu`, `mason4agents-darwin-x64`, `mason4agents-darwin-arm64`, `mason4agents-win32-x64`, and `mason4agents-win32-arm64`. The native packages contain only `package.json`, `LICENSE`, and `bin/mason4agents` or `bin/mason4agents.exe`, and they do not declare their own `bin` field.
+
+GitHub Actions has two workflows:
+
+- `ci.yml` runs on branch pushes and pull requests. It runs the Rust/TypeScript/Bun quality gate and builds/smoke-tests native CLI artifacts for Linux, macOS, and Windows on x64 and arm64.
+- `release.yml` runs on `v*` tags. It rebuilds from the tag, uploads the six native artifacts, stages npm packages, validates `npm pack --dry-run --json` contents, publishes all native packages first, then publishes the root package.
+
+Tag releases should use `vX.Y.Z`, and the tag must match `package.json`'s version. First-time publishing of the six native child packages requires npm bootstrap (local login or temporary `NPM_TOKEN`) because npm Trusted Publishing can only be configured for packages that already exist. After bootstrap, configure Trusted Publishing for `mason4agents` and all six native packages against `.github/workflows/release.yml`, then remove the temporary token.
 
 ## Tests
 
