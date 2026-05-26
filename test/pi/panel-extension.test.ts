@@ -42,6 +42,36 @@ function bridge() {
           },
         ];
       }
+      if (args[0] === "suggested") {
+        return [
+          {
+            name: "stylua",
+            version: "v2.0.0",
+            installed: false,
+            installed_version: null,
+            outdated: false,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["Formatter"],
+            description: "Lua formatter",
+            reason: "Lua source files detected; Formatter via LazyVim",
+            source: "lazyvim-extras-lang:builtin",
+          },
+          {
+            name: "lua-language-server",
+            version: "v3.9.0",
+            installed: true,
+            installed_version: "v3.8.0",
+            outdated: true,
+            deprecated: false,
+            languages: ["Lua"],
+            categories: ["LSP"],
+            description: "Lua LSP",
+            reason: "Lua source files detected; LSP via LazyVim",
+            source: "lazyvim-extras-lang:builtin",
+          },
+        ];
+      }
       if (args[0] === "list" && args.includes("--installed")) {
         return [
           {
@@ -183,6 +213,9 @@ describe("Mason panel", () => {
     expect(calls).toHaveLength(callCount);
 
     await panel.handleInput("tab");
+    expect(panel.render()).toContain("[suggested]");
+    expect(panel.render()).toContain("Reason");
+    await panel.handleInput("tab");
     expect(panel.render()).toContain("Installed At");
     expect(panel.render()).toContain("lua-language-server");
   });
@@ -238,7 +271,7 @@ describe("Mason panel", () => {
     expect((component?.render(48) as string[]).join("\n")).not.toContain("package details");
     component?.handleInput("tab");
     await Promise.resolve();
-    expect((component?.render(48) as string[]).join("\n")).toContain("[installed]");
+    expect((component?.render(48) as string[]).join("\n")).toContain("[suggested]");
     component?.handleInput("\x1b[9;2u");
     await Promise.resolve();
     expect((component?.render(48) as string[]).join("\n")).toContain("[list]");

@@ -14,6 +14,7 @@ export interface TableDisplay {
   emptyMessage: string;
   searchable: boolean;
   footer?: readonly string[];
+  successMarkerColumn?: number;
 }
 
 export interface SummaryDisplay {
@@ -41,6 +42,7 @@ export type MasonResultKind =
   | "refresh"
   | "packages"
   | "installed"
+  | "suggestions"
   | "install"
   | "uninstall"
   | "which"
@@ -71,6 +73,7 @@ export interface RenderStyle {
   help?: (text: string) => string;
   shortcutKey?: (text: string) => string;
   shortcutAction?: (text: string) => string;
+  installedMarker?: (text: string) => string;
 }
 
 export type ShortcutAction = readonly [key: string, action: string];
@@ -97,6 +100,7 @@ export function usageDisplay(): UsageDisplay {
       "/mason bin-dir",
       "/mason env --shell bash|zsh|fish|powershell|cmd|json",
       "/mason doctor",
+      "/mason register --omp                         update OMP lsp.json for installed LSP tools",
       "",
       `Table views: ${shortcutText([["[/]", "filter"], ["[↑]/[↓]/[PgUp]/[PgDn]", "scroll"], ["[q]/[Esc]", "close"]])}`,
     ],
@@ -111,6 +115,8 @@ export function modelForResult(kind: MasonResultKind, data: unknown, title: stri
   switch (kind) {
     case "packages":
       return packageTable(title, data);
+    case "suggestions":
+      return suggestionTable(title, data);
     case "installed":
       return installedTable(title, data);
     case "install":
@@ -173,6 +179,26 @@ function packageTable(title: string, data: unknown): TableDisplay {
     searchable: true,
   };
   return display;
+}
+
+function suggestionTable(title: string, data: unknown): TableDisplay {
+  const rows = Array.isArray(data) ? data.map(suggestionRow) : [];
+  return {
+    kind: "table",
+    title,
+    columns: [
+      { label: "", minWidth: 1, maxWidth: 1 },
+      { label: "Name", minWidth: 8, maxWidth: 28 },
+      { label: "Version", minWidth: 7, maxWidth: 16 },
+      { label: "Languages", minWidth: 9, maxWidth: 18 },
+      { label: "Categories", minWidth: 10, maxWidth: 18 },
+      { label: "Reason", minWidth: 12, maxWidth: 56, grow: 1 },
+    ],
+    rows,
+    emptyMessage: Array.isArray(data) ? "No suggested packages found." : "Unexpected suggested package response.",
+    searchable: true,
+    successMarkerColumn: 0,
+  };
 }
 
 function installedTable(title: string, data: unknown): TableDisplay {
@@ -320,6 +346,18 @@ function packageRow(value: unknown): string[] {
   ];
 }
 
+function suggestionRow(value: unknown): string[] {
+  if (!isRecord(value)) return ["", String(value), "", "", "", ""];
+  return [
+    value.installed === true ? "✓" : "",
+    stringValue(value.name) || "<unknown>",
+    stringValue(value.version) || "-",
+    stringList(value.languages),
+    stringList(value.categories),
+    stringValue(value.reason) || stringValue(value.description),
+  ];
+}
+
 function installedRow(value: unknown): string[] {
   if (!isRecord(value)) return [String(value), "", "", ""];
   return [
@@ -400,7 +438,7 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
       for (let rowLineIndex = 0; rowLineIndex < rowLines.length; rowLineIndex += 1) {
         const prefix = selected && rowLineIndex === 0 ? "▶ " : "  ";
         const rowLine = formatPrefixedTableLine(rowLines[rowLineIndex]!, prefix, hasSelection, width);
-        bodyLines.push(selected && style?.selectedRow ? style.selectedRow(fitPlainToWidth(rowLine, width)) : rowLine);
+        bodyLines.push(renderTableBodyLine(rowLine, model, layout, prefix, hasSelection, selected, style, width));
       }
     }
   } else {
@@ -414,7 +452,7 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
       for (let rowLineIndex = 0; rowLineIndex < visibleLineCount; rowLineIndex += 1) {
         const prefix = selected && rowLineIndex === 0 ? "▶ " : "  ";
         const rowLine = formatPrefixedTableLine(rowLines[rowLineIndex]!, prefix, hasSelection, width);
-        bodyLines.push(selected && style?.selectedRow ? style.selectedRow(fitPlainToWidth(rowLine, width)) : rowLine);
+        bodyLines.push(renderTableBodyLine(rowLine, model, layout, prefix, hasSelection, selected, style, width));
       }
       rowIndex += 1;
     }
@@ -438,6 +476,45 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
     for (const line of model.footer) lines.push(truncateToWidth(line, width));
   }
   return lines;
+}
+
+function renderTableBodyLine(
+  rowLine: string,
+  model: TableDisplay,
+  layout: ColumnLayout,
+  prefix: string,
+  hasSelection: boolean,
+  selected: boolean,
+  style: RenderStyle | undefined,
+  width: number,
+): string {
+  const selectedStyler = selected ? style?.selectedRow : undefined;
+  const baseLine = selectedStyler ? fitPlainToWidth(rowLine, width) : rowLine;
+  const markerIndex = successMarkerIndex(model, layout, prefix, hasSelection);
+  if (markerIndex < 0 || baseLine[markerIndex] !== "✓") {
+    return selectedStyler ? selectedStyler(baseLine) : baseLine;
+  }
+  const markerStyler = style?.installedMarker ?? selectedStyler;
+  return renderStyledSegments(
+    [
+      { text: baseLine.slice(0, markerIndex), styler: selectedStyler },
+      { text: baseLine[markerIndex]!, styler: markerStyler },
+      { text: baseLine.slice(markerIndex + 1), styler: selectedStyler },
+    ],
+    baseLine.length,
+    undefined,
+    false,
+  );
+}
+
+function successMarkerIndex(model: TableDisplay, layout: ColumnLayout, prefix: string, hasSelection: boolean): number {
+  const column = model.successMarkerColumn;
+  if (column === undefined || column < 0 || column >= layout.widths.length) return -1;
+  let offset = hasSelection ? prefix.length : 0;
+  for (let index = 0; index < column; index += 1) {
+    offset += layout.widths[index]! + TABLE_SEPARATOR.length;
+  }
+  return offset;
 }
 
 function tableBodyStart(rowLineSets: readonly (readonly string[])[], scroll: number, selectedRow: number | undefined, bodyHeight: number): number {

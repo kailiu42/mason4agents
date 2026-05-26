@@ -30,6 +30,14 @@ function packages() {
   ];
 }
 
+function suggestions() {
+  return packages().map((pkg) => ({
+    ...pkg,
+    reason: pkg.name === "stylua" ? "Lua source files detected; Formatter via LazyVim" : "Lua source files detected; LSP via LazyVim",
+    source: "lazyvim-extras-lang:builtin",
+  }));
+}
+
 function host() {
   const calls: string[][] = [];
   let syncs = 0;
@@ -37,6 +45,7 @@ function host() {
     async runCli(args: string[]) {
       calls.push(args);
       if (args[0] === "search") return packages();
+      if (args[0] === "suggested") return suggestions();
       if (args[0] === "list" && args.includes("--installed")) {
         return [
           {
@@ -197,8 +206,8 @@ describe("Mason TUI core", () => {
     expect(detail).toContain("package details");
     expect(detail).toContain("Package: stylua");
     expect(detail).toContain("[i]: install");
-    expect(detail).toContain("[u]: update");
-    expect(detail).toContain("[r]: uninstall");
+    expect(detail).not.toContain("[u]: update");
+    expect(detail).not.toContain("[r]: uninstall");
     await tui.handleInput("\x1b[27u");
     expect(tui.state.view).toBe("list");
     expect(tui.render()).not.toContain("package details");
@@ -263,19 +272,54 @@ describe("Mason TUI core", () => {
     expect(syncs()).toBe(3);
   });
 
+  test("renders suggested rows with installed marker and state-aware shortcuts", async () => {
+    const { host: fake, calls } = host();
+    const tui = createMasonTui(fake);
+    await tui.runCurrent();
+    await tui.handleInput("tab");
+
+    expect(tui.state.command).toBe("suggested");
+    expect(calls).toContainEqual(["suggested"]);
+    expect(tui.render()).toContain("Reason");
+    expect(tui.render()).toContain("stylua");
+    expect(tui.render()).toContain("✓");
+    expect(tui.render()).toContain("[i]: install");
+    expect(tui.render()).not.toContain("[u]: update");
+
+    await tui.handleInput("down");
+    const installedRender = tui.render();
+    expect(installedRender).toContain("▶ ✓");
+    expect(installedRender).toContain("[u]: update");
+    expect(installedRender).toContain("[r]: uninstall");
+    expect(installedRender).not.toContain("[i]: install");
+
+    const styled = tui.renderLines(96, {
+      installedMarker: (text) => `\x1b[32m${text}\x1b[39m`,
+    });
+    expect(styled.join("\n")).toContain("\x1b[32m✓\x1b[39m");
+    expect(styled.every((line) => stripAnsi(line).length <= 96)).toBe(true);
+  });
+
   test("switches tabs with tab and arrows", async () => {
     const { host: fake, calls } = host();
     const tui = createMasonTui(fake);
     await tui.runCurrent();
 
-    expect(MASON_TUI_COMMANDS.map((command) => command.label)).toEqual(["list", "installed", "check update", "refresh", "doctor"]);
+    expect(MASON_TUI_COMMANDS.map((command) => command.label)).toEqual(["list", "suggested", "installed", "check update", "refresh", "doctor"]);
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("╱");
     expect(tui.render()).toContain("[c]: cat │ [Enter]: detail");
+    expect(tui.render()).toContain("[i]: install");
     expect(tui.render()).not.toContain("showing 1-");
     await tui.handleInput("tab");
+    expect(tui.state.command).toBe("suggested");
+    expect(tui.render()).toContain("[suggested]");
+    expect(tui.render()).toContain("Reason");
+    expect(tui.render()).toContain("[i]: install");
+    expect(calls).toContainEqual(["suggested"]);
+    await tui.handleInput("right");
     expect(tui.state.command).toBe("installed");
-    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [Enter]: detail │ [i/u/r]: install/update/uninstall");
+    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [Enter]: detail │ [u]: update │ [r]: uninstall");
     expect(tui.render()).not.toContain("[l]: lang");
     await tui.handleInput("right");
     expect(tui.state.command).toBe("update");
@@ -292,6 +336,8 @@ describe("Mason TUI core", () => {
     expect(tui.state.command).toBe("update");
     await tui.handleInput("\x1b[27;2;9~");
     expect(tui.state.command).toBe("installed");
+    await tui.handleInput("left");
+    expect(tui.state.command).toBe("suggested");
     await tui.handleInput("left");
     expect(tui.state.command).toBe("list");
   });
@@ -405,9 +451,9 @@ describe("Mason TUI core", () => {
     const secondList = tui.handleInput("left");
 
     expect(pending.map((item) => item.args)).toEqual([
-      ["list", "--installed"],
+      ["suggested"],
       ["list"],
-      ["list", "--installed"],
+      ["suggested"],
       ["list"],
     ]);
     pending[3]!.resolve(packages());
@@ -416,14 +462,7 @@ describe("Mason TUI core", () => {
     expect(tui.render()).toContain("Description");
     expect(tui.render()).not.toContain("Installed At");
 
-    pending[2]!.resolve([
-      {
-        name: "lua-language-server",
-        version: "v3.8.0",
-        bins: { "lua-language-server": "bin/lua-language-server" },
-        installed_at: "2026-05-24T00:00:00Z",
-      },
-    ]);
+    pending[2]!.resolve(suggestions());
     await secondInstalled;
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("Description");
@@ -435,14 +474,7 @@ describe("Mason TUI core", () => {
     expect(tui.render()).toContain("Description");
     expect(tui.render()).not.toContain("Installed At");
 
-    pending[0]!.resolve([
-      {
-        name: "lua-language-server",
-        version: "v3.8.0",
-        bins: { "lua-language-server": "bin/lua-language-server" },
-        installed_at: "2026-05-24T00:00:00Z",
-      },
-    ]);
+    pending[0]!.resolve(suggestions());
     await firstInstalled;
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("Description");

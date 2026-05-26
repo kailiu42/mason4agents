@@ -139,6 +139,7 @@ function styleFromPiTheme(theme: unknown): MasonTuiStyle | undefined {
     tableHeader: toolHeader,
     tableSeparator: (text) => fg("borderMuted", text),
     selectedRow: selected,
+    installedMarker: (text) => fg("success", bold(text)),
     help: (text) => fg("dim", text),
     shortcutKey: (text) => fg("accent", bold(text)),
     shortcutAction: (text) => fg("customMessageText", text),

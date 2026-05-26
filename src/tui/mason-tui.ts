@@ -4,6 +4,7 @@ import { errorDisplay, modelForResult, renderDisplay, renderInlineShortcutText, 
 export type MasonTuiCommandId =
   | "search"
   | "list"
+  | "suggested"
   | "installed"
   | "install"
   | "uninstall"
@@ -95,6 +96,7 @@ export interface MasonTui {
 const MASON_TUI_COMMAND_DEFINITIONS: readonly MasonTuiCommand[] = [
   { id: "search", label: "search", inputLabel: "query" },
   { id: "list", label: "list" },
+  { id: "suggested", label: "suggested" },
   { id: "installed", label: "installed" },
   { id: "install", label: "install", inputLabel: "packages" },
   { id: "uninstall", label: "uninstall", inputLabel: "packages" },
@@ -335,6 +337,7 @@ function initialInputs(): Record<MasonTuiCommandId, string> {
   return {
     search: "",
     list: "",
+    suggested: "",
     installed: "",
     install: "",
     uninstall: "",
@@ -353,6 +356,8 @@ function buildInvocation(state: MasonTuiState): MasonTuiInvocation {
       return buildSearchInvocation(state);
     case "list":
       return { argv: ["list"], resultKind: "packages", title: "mason list" };
+    case "suggested":
+      return { argv: ["suggested"], resultKind: "suggestions", title: "mason suggested" };
     case "installed":
       return { argv: ["list", "--installed"], resultKind: "installed", title: "mason installed" };
     case "install": {
@@ -473,6 +478,8 @@ function renderDetailContentLines(state: MasonTuiState, width: number, style: Ma
   const lines = [detailFieldLine(width, "Package", name, style, style.detailName)];
   if (item) {
     pushDetail(lines, width, "Status", packageStatusForDetail(state, item), style, style.detailStatus);
+    pushDetail(lines, width, "Reason", stringValue(item.reason) || "-", style);
+    pushDetail(lines, width, "Suggested by", stringValue(item.source) || "-", style);
     pushDetail(lines, width, "Version", stringValue(item.version) || "-", style);
     pushDetail(lines, width, "Installed", stringValue(item.installed_version) || (isInstalledPackage(state, item) ? "yes" : "no"), style);
     pushDetail(lines, width, "Languages", stringList(item.languages) || "-", style);
@@ -486,7 +493,7 @@ function renderDetailContentLines(state: MasonTuiState, width: number, style: Ma
   } else {
     for (let index = 0; index < row.length; index += 1) pushDetail(lines, width, `Column ${index + 1}`, row[index] ?? "-", style);
   }
-  pushActionLines(lines, width, style);
+  pushActionLines(state, lines, width, style);
   return lines;
 }
 
@@ -581,15 +588,10 @@ function detailFieldLine(width: number, label: string, value: string, style: Mas
   return fitToWidth(`${styleLine(labelText, style.detailLabel)}${styleLine(renderedValue, valueStyler)}`, width);
 }
 
-function pushActionLines(lines: string[], width: number, style: MasonTuiStyle): void {
+function pushActionLines(state: MasonTuiState, lines: string[], width: number, style: MasonTuiStyle): void {
   const separatorLength = " │ ".length;
-  const actions = [
-    ["[i]", "install"],
-    ["[u]", "update"],
-    ["[r]", "uninstall"],
-    ["[q]/[Esc]", "back"],
-  ] as const;
-  const current: typeof actions[number][] = [];
+  const actions: ShortcutAction[] = [...packageOperationActions(state), ["[q]/[Esc]", "back"]];
+  const current: ShortcutAction[] = [];
   let currentLength = 0;
   for (const action of actions) {
     const partLength = action[0].length + 2 + action[1].length;
@@ -616,33 +618,53 @@ function detailActionLine(actions: readonly (readonly [string, string])[], width
 
 function renderCommandTabs(state: MasonTuiState, width: number, style: MasonTuiStyle): string {
   const parts: string[] = [];
-  let used = 0;
-  for (let index = 0; index < MASON_TUI_COMMANDS.length && used < width; index += 1) {
-    const command = MASON_TUI_COMMANDS[index]!;
-    if (index > 0 && !pushTabPart(parts, TAB_SEPARATOR, width, used, style.tabSeparator)) break;
-    if (index > 0) used += Math.min(TAB_SEPARATOR.length, width - used);
-    const text = index === state.commandIndex ? `[${command.label}]` : ` ${command.label} `;
-    if (!pushTabPart(parts, text, width, used, index === state.commandIndex ? style.activeTab : style.tab)) break;
-    used += Math.min(text.length, width - used);
-  }
+  const filters = tabFilterBadges(state);
   const meta = width >= 48 ? tabMetaText(state) : "";
+  const filterReserve = filterBadgesWidth(filters);
+  const tabWidth = Math.max(1, width - filterReserve);
+  const compactTabs = tabBarWidth(state, true, meta, filterReserve) <= width && tabBarWidth(state, false, meta, filterReserve) > width;
+  let used = 0;
+  for (let index = 0; index < MASON_TUI_COMMANDS.length && used < tabWidth; index += 1) {
+    const command = MASON_TUI_COMMANDS[index]!;
+    if (index > 0 && !pushTabPart(parts, TAB_SEPARATOR, tabWidth, used, style.tabSeparator)) break;
+    if (index > 0) used += Math.min(TAB_SEPARATOR.length, tabWidth - used);
+    const text = index === state.commandIndex ? `[${command.label}]` : compactTabs ? command.label : ` ${command.label} `;
+    if (!pushTabPart(parts, text, tabWidth, used, index === state.commandIndex ? style.activeTab : style.tab)) break;
+    used += Math.min(text.length, tabWidth - used);
+  }
   if (meta.length > 0 && used < width) {
     const separator = "  │  ";
-    if (pushTabPart(parts, separator, width, used, style.tabSeparator)) {
+    if (used + separator.length + meta.length + filterReserve <= width && pushTabPart(parts, separator, width, used, style.tabSeparator)) {
       used += Math.min(separator.length, width - used);
-      if (used < width) pushTabPart(parts, meta, width, used, style.tabMeta ?? style.tab);
+      if (pushTabPart(parts, meta, width, used, style.tabMeta ?? style.tab)) used += Math.min(meta.length, width - used);
     }
   }
-  const filters = tabFilterBadges(state);
-  if (filters.length > 0) {
-    if (parts.length > 0) parts.push(styleLine("  ", style.tabMeta ?? style.tab));
-    for (let index = 0; index < filters.length; index += 1) {
-      if (index > 0) parts.push(styleLine(" ", style.tabMeta ?? style.tab));
-      parts.push(styleLine(filters[index]!, style.edit));
+  if (filters.length > 0 && used < width) {
+    if (parts.length > 0 && pushTabPart(parts, "  ", width, used, style.tabMeta ?? style.tab)) used += Math.min(2, width - used);
+    for (let index = 0; index < filters.length && used < width; index += 1) {
+      if (index > 0 && pushTabPart(parts, " ", width, used, style.tabMeta ?? style.tab)) used += Math.min(1, width - used);
+      const badge = filters[index]!;
+      if (!pushTabPart(parts, badge, width, used, style.edit)) break;
+      used += Math.min(badge.length, width - used);
     }
   }
-  const tabs = parts.join("");
-  return styleLine(fitToWidth(tabs, width), style.tabBar);
+  return styleLine(fitToWidth(parts.join(""), width), style.tabBar);
+}
+
+function tabBarWidth(state: MasonTuiState, compactTabs: boolean, meta: string, filterReserve: number): number {
+  let width = 0;
+  for (let index = 0; index < MASON_TUI_COMMANDS.length; index += 1) {
+    if (index > 0) width += TAB_SEPARATOR.length;
+    const label = MASON_TUI_COMMANDS[index]!.label;
+    width += index === state.commandIndex ? label.length + 2 : compactTabs ? label.length : label.length + 2;
+  }
+  if (meta.length > 0) width += "  │  ".length + meta.length;
+  return width + filterReserve;
+}
+
+function filterBadgesWidth(filters: readonly string[]): number {
+  if (filters.length === 0) return 0;
+  return 2 + filters.reduce((sum, filter) => sum + filter.length, 0) + Math.max(0, filters.length - 1);
 }
 
 function tabMetaText(state: MasonTuiState): string {
@@ -672,6 +694,7 @@ function tabFilterBadges(state: MasonTuiState): string[] {
 function tableCountNoun(state: MasonTuiState, count: number): string {
   if (state.command === "installed") return "installed";
   if (state.command === "update") return count === 1 ? "update" : "updates";
+  if (state.command === "suggested") return count === 1 ? "suggestion" : "suggestions";
   return count === 1 ? "package" : "packages";
 }
 
@@ -691,7 +714,7 @@ function updateTableData(state: MasonTuiState, resultKind: MasonResultKind, data
     state.tableItems = [];
     state.lastTableKind = undefined;
   }
-  if (Array.isArray(data) && (resultKind === "packages" || resultKind === "installed")) state.packages = data;
+  if (Array.isArray(data) && (resultKind === "packages" || resultKind === "installed" || resultKind === "suggestions")) state.packages = data;
 }
 
 function activeNameFilter(state: MasonTuiState): string {
@@ -987,7 +1010,7 @@ async function runPackageCommand(state: MasonTuiState, host: MasonTuiHost, argv:
 
 async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string): Promise<void> {
   state.selectedPackage = packageName;
-  if (state.command === "search" || state.command === "list" || state.command === "installed" || state.command === "update") {
+  if (state.command === "search" || state.command === "list" || state.command === "suggested" || state.command === "installed" || state.command === "update") {
     const planned = buildInvocation(state);
     state.model = { kind: "summary", title: planned.title, lines: ["Loading..."] };
     const data = await host.runCli(planned.argv);
@@ -1136,10 +1159,16 @@ function actionHelpActions(state: MasonTuiState, width: number): ShortcutAction[
   if (state.edit) return isPickerEdit(state.edit) ? [["[Enter]", "select"], ["[Esc]", "cancel"]] : [["[Enter]", "apply"], ["[Esc]", "cancel"], ["[Backspace]", "delete"]];
   if (state.command === "refresh") return [["[r]", "refresh registry"], ["[q]/[Esc]", "close"]];
   if (state.model.kind === "table") {
-    const packageAction = width < 100 ? "pkg" : width < 110 ? "pkg ops" : "install/update/uninstall";
-    return [["[Enter]", "detail"], ["[i/u/r]", packageAction]];
+    return [["[Enter]", "detail"], ...packageOperationActions(state)];
   }
   return [["[Enter]", "run"], ["[q]/[Esc]", "close"]];
+}
+
+function packageOperationActions(state: MasonTuiState): ShortcutAction[] {
+  const selected = selectedEntryWithoutSync(state);
+  if (!selected || !packageNameFromItemOrRow(selected.item, selected.row)) return [];
+  const item = recordValue(selected.item);
+  return isInstalledPackage(state, item) ? [["[u]", "update"], ["[r]", "uninstall"]] : [["[i]", "install"]];
 }
 
 function browseHelpActions(state: MasonTuiState, width: number): ShortcutAction[] {
@@ -1187,6 +1216,7 @@ function packageStatusForDetail(state: MasonTuiState, item: Record<string, unkno
   const installed = isInstalledPackage(state, item);
   if (installed && item.outdated === true) return "outdated";
   if (installed) return "installed";
+  if (state.command === "suggested") return "suggested";
   return "available";
 }
 
@@ -1333,9 +1363,28 @@ function normalizeWidth(width: number): number {
 function truncateToWidth(value: string, width: number): string {
   if (width <= 0) return "";
   if (visibleLength(value) <= width) return value;
-  if (stripAnsi(value).length !== value.length) return value;
+  if (stripAnsi(value).length !== value.length) return truncateAnsiToWidth(value, width);
   if (width === 1) return value.slice(0, 1);
   return `${value.slice(0, width - 1)}…`;
+}
+
+function truncateAnsiToWidth(value: string, width: number): string {
+  let visible = 0;
+  let output = "";
+  for (let index = 0; index < value.length && visible < width;) {
+    if (value[index] === "\x1b") {
+      const sequence = value.slice(index).match(/^\x1b\[[0-9;]*m/);
+      if (sequence) {
+        output += sequence[0];
+        index += sequence[0].length;
+        continue;
+      }
+    }
+    output += value[index]!;
+    index += 1;
+    visible += 1;
+  }
+  return output.includes("\x1b") ? `${output}\x1b[0m` : output;
 }
 
 function fitToWidth(value: string, width: number): string {
