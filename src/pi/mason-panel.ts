@@ -122,7 +122,7 @@ function styleFromPiTheme(theme: unknown): MasonTuiStyle | undefined {
   const fg = (token: string, text: string) => typeof record?.fg === "function" ? record.fg(token, text) : text;
   const bg = (token: string, text: string) => typeof record?.bg === "function" ? record.bg(token, text) : text;
   const bold = (text: string) => typeof record?.bold === "function" ? record.bold(text) : text;
-  const selected = (text: string) => bg("selectedBg", fg("text", text));
+  const selected = (text: string) => bg("selectedBg", fg("accent", text));
   const toolHeader = (text: string) => bg("customMessageBg", fg("toolTitle", bold(text)));
   const popupBody = (text: string) => bg("customMessageBg", text);
   return {
@@ -131,7 +131,7 @@ function styleFromPiTheme(theme: unknown): MasonTuiStyle | undefined {
     tab: (text) => bg("customMessageBg", fg("muted", text)),
     activeTab: (text) => bg("selectedBg", fg("accent", bold(text))),
     tabSeparator: (text) => bg("customMessageBg", fg("borderMuted", text)),
-    stateLine: (text) => fg("muted", text),
+    tabMeta: (text) => bg("customMessageBg", fg("muted", text)),
     divider: (text) => fg("borderAccent", text),
     edit: (text) => fg("accent", text),
     notice: (text) => fg("accent", text),

@@ -57,6 +57,8 @@ export interface RenderOptions {
   maxRows?: number;
   selectedRow?: number;
   fixedHeight?: boolean;
+  showTitle?: boolean;
+  showHelp?: boolean;
   totalRows?: number | undefined;
   style?: RenderStyle;
 }
@@ -74,6 +76,7 @@ export interface RenderStyle {
 export type ShortcutAction = readonly [key: string, action: string];
 
 const TABLE_SEPARATOR = "  ";
+const SHORTCUT_SEPARATOR = " │ ";
 const DEFAULT_MAX_ROWS = 24;
 
 export function usageDisplay(): UsageDisplay {
@@ -367,7 +370,8 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
   if (filter.length > 0) titleParts.push(`filter: ${filter}`);
   if (options.filterSummary && options.filterSummary.length > 0) titleParts.push(options.filterSummary);
   const titleLine = truncateToWidth(titleParts.join("  "), width);
-  const lines = [style?.tableTitle ? style.tableTitle(fitPlainToWidth(titleLine, width)) : titleLine];
+  const lines: string[] = [];
+  if (options.showTitle !== false) lines.push(style?.tableTitle ? style.tableTitle(fitPlainToWidth(titleLine, width)) : titleLine);
   if (model.subtitle && model.subtitle.length > 0) lines.push(truncateToWidth(model.subtitle, width));
   if (filteredRows.length === 0 && !fixedHeight) {
     lines.push(truncateToWidth(model.emptyMessage, width));
@@ -394,7 +398,7 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
       const selected = selectedRow === rowIndex;
       const rowLines = rowLineSets[rowIndex]!;
       for (let rowLineIndex = 0; rowLineIndex < rowLines.length; rowLineIndex += 1) {
-        const prefix = selected && rowLineIndex === 0 ? "> " : "  ";
+        const prefix = selected && rowLineIndex === 0 ? "▶ " : "  ";
         const rowLine = formatPrefixedTableLine(rowLines[rowLineIndex]!, prefix, hasSelection, width);
         bodyLines.push(selected && style?.selectedRow ? style.selectedRow(fitPlainToWidth(rowLine, width)) : rowLine);
       }
@@ -408,7 +412,7 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
       const remaining = maxRows - bodyLines.length;
       const visibleLineCount = Math.min(remaining, rowLines.length);
       for (let rowLineIndex = 0; rowLineIndex < visibleLineCount; rowLineIndex += 1) {
-        const prefix = selected && rowLineIndex === 0 ? "> " : "  ";
+        const prefix = selected && rowLineIndex === 0 ? "▶ " : "  ";
         const rowLine = formatPrefixedTableLine(rowLines[rowLineIndex]!, prefix, hasSelection, width);
         bodyLines.push(selected && style?.selectedRow ? style.selectedRow(fitPlainToWidth(rowLine, width)) : rowLine);
       }
@@ -420,14 +424,16 @@ function renderTableDisplay(model: TableDisplay, width: number, options: RenderO
     bodyLines.push(formatPrefixedTableLine(fitPlainToWidth("", tableWidth), "  ", hasSelection, width));
   }
   lines.push(...bodyLines);
-  const range = filteredRows.length === 0 ? "showing 0-0 of 0" : `showing ${renderedStart + 1}-${renderedEnd} of ${filteredRows.length}`;
-  const navigationActions: ShortcutAction[] = hasSelection ? [["[↑]/[↓]", "select"], ["[Enter]", "detail"]] : [["[↑]/[↓]", "scroll"]];
-  const helpActions: ShortcutAction[] = [
-    ...(model.searchable ? options.filterActions ?? [["[/]", "filter"]] : []),
-    ...navigationActions,
-    ["[q]/[Esc]", "close"],
-  ];
-  lines.push(renderShortcutLine(range, helpActions, width, style));
+  if (options.showHelp !== false) {
+    const range = filteredRows.length === 0 ? "showing 0-0 of 0" : `showing ${renderedStart + 1}-${renderedEnd} of ${filteredRows.length}`;
+    const navigationActions: ShortcutAction[] = hasSelection ? [["[↑]/[↓]", "select"], ["[Enter]", "detail"]] : [["[↑]/[↓]", "scroll"]];
+    const helpActions: ShortcutAction[] = [
+      ...(model.searchable ? options.filterActions ?? [["[/]", "filter"]] : []),
+      ...navigationActions,
+      ["[q]/[Esc]", "close"],
+    ];
+    lines.push(renderShortcutLine(range, helpActions, width, style));
+  }
   if (model.footer) {
     for (const line of model.footer) lines.push(truncateToWidth(line, width));
   }
@@ -461,7 +467,7 @@ function renderTextDisplay(title: string, textLines: readonly string[], width: n
 }
 
 export function shortcutText(actions: readonly ShortcutAction[]): string {
-  return actions.map(([key, action]) => `${key}: ${action}`).join("  ");
+  return actions.map(([key, action]) => `${key}: ${action}`).join(SHORTCUT_SEPARATOR);
 }
 
 export function renderShortcutLine(prefix: string, actions: readonly ShortcutAction[], width: number, style?: RenderStyle): string {
@@ -469,7 +475,11 @@ export function renderShortcutLine(prefix: string, actions: readonly ShortcutAct
   if (prefix.length > 0) segments.push({ text: prefix, styler: style?.help });
   for (let index = 0; index < actions.length; index += 1) {
     const [key, action] = actions[index]!;
-    if (index > 0 || prefix.length > 0) segments.push({ text: "  ", styler: style?.help });
+    if (index === 0 && prefix.length > 0) {
+      segments.push({ text: " ", styler: style?.help });
+    } else if (index > 0) {
+      segments.push({ text: SHORTCUT_SEPARATOR, styler: style?.help });
+    }
     segments.push(
       { text: key, styler: style?.shortcutKey },
       { text: ": ", styler: style?.shortcutAction },

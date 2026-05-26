@@ -129,7 +129,6 @@ describe("Mason panel", () => {
     const rendered = panel.render();
     expect(rendered).toContain("stylua");
     expect(rendered).toContain("Status");
-    expect(rendered).toContain("language=Lua");
     await panel.install(["stylua"]);
     await panel.uninstall(["stylua"]);
     await panel.update(["stylua"]);
@@ -165,7 +164,7 @@ describe("Mason panel", () => {
     await panel.handleInput("u");
     await panel.handleInput("a");
     await panel.handleInput("enter");
-    expect(panel.render()).toContain("language=Lua");
+    expect(panel.state.language).toBe("Lua");
     expect(calls).toHaveLength(callCount);
 
     await panel.handleInput("tab");

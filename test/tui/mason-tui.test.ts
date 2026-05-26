@@ -68,8 +68,10 @@ describe("Mason TUI core", () => {
 
     expect(narrow.every((line) => line.length <= 32)).toBe(true);
     expect(wide.every((line) => line.length <= 96)).toBe(true);
-    expect(narrow.join("\n")).toContain("> stylua");
+    expect(narrow.join("\n")).toContain("▶ stylua");
     expect(wide.join("\n")).toContain("Description");
+    expect(wide.join("\n")).toContain("2 packages");
+    expect(wide.join("\n")).not.toContain("mason list —");
   });
 
   test("uses available table width and wraps long cells inside their columns", () => {
@@ -89,7 +91,7 @@ describe("Mason TUI core", () => {
 
     const lines = renderDisplay(model, { width: 96, maxRows: 8, selectedRow: 0, fixedHeight: true });
     const separator = lines.find((line) => /^  ─+$/.test(line));
-    const firstRow = lines.find((line) => line.startsWith("> asmfmt"));
+    const firstRow = lines.find((line) => line.startsWith("▶ asmfmt"));
     const continuation = lines.find((line) => line.includes("description column without"));
 
     expect(lines.every((line) => line.length <= 96)).toBe(true);
@@ -174,14 +176,14 @@ describe("Mason TUI core", () => {
     await tui.runCurrent();
 
     await tui.handleInput("down");
-    expect(tui.render()).toContain("> lua-language-server");
+    expect(tui.render()).toContain("▶ lua-language-server");
 
     await tui.handleInput("/");
     for (const key of "stylua") await tui.handleInput(key);
     await tui.handleInput("enter");
     expect(tui.state.selectedIndex).toBe(0);
-    expect(tui.render()).toContain("> stylua");
-    expect(tui.render()).not.toContain("> lua-language-server");
+    expect(tui.render()).toContain("▶ stylua");
+    expect(tui.render()).not.toContain("▶ lua-language-server");
 
     await tui.handleInput("enter");
     expect(tui.state.view).toBe("detail");
@@ -225,9 +227,9 @@ describe("Mason TUI core", () => {
     expect(lines.join("\n")).toContain("\x1b[48;5;27m[list]");
     expect(lines.join("\n")).toContain("\x1b[38;5;244m  ╱  \x1b[39m");
     expect(lines.join("\n")).not.toContain("\x1b[48;5;27m  ╱");
-    expect(lines.join("\n")).toContain("\x1b[48;5;240m> stylua");
-    expect(lines.join("\n")).toContain("\x1b[38;5;39m[/]\x1b[39m");
-    expect(lines.join("\n")).toContain("\x1b[38;5;250mname\x1b[39m");
+    expect(lines.join("\n")).toContain("\x1b[48;5;240m▶ stylua");
+    expect(lines.join("\n")).toContain("\x1b[38;5;39m[Tab/S-Tab/←→]/[↑↓/Pg]/[/]/[l]\x1b[39m");
+    expect(lines.join("\n")).toContain("\x1b[38;5;250mbrowse\x1b[39m");
     expect(lines.every((line) => stripAnsi(line).length <= 72)).toBe(true);
 
     await tui.handleInput("enter");
@@ -264,11 +266,16 @@ describe("Mason TUI core", () => {
     expect(MASON_TUI_COMMANDS.map((command) => command.label)).toEqual(["list", "installed", "check update", "refresh", "doctor"]);
     expect(tui.state.command).toBe("list");
     expect(tui.render()).toContain("╱");
+    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [l]: lang │ [Enter]: detail │ [i/u/r]: install/update/uninstall");
+    expect(tui.render()).not.toContain("showing 1-");
     await tui.handleInput("tab");
     expect(tui.state.command).toBe("installed");
+    expect(tui.render()).toContain("[Tab/S-Tab/←→]: tabs │ [↑↓/Pg]: move │ [/]: name │ [Enter]: detail │ [i/u/r]: install/update/uninstall");
+    expect(tui.render()).not.toContain("[l]: lang");
     await tui.handleInput("right");
     expect(tui.state.command).toBe("update");
     expect(tui.render()).toContain("[check update]");
+    expect(tui.render()).toContain("[l]: lang");
     expect(calls).toContainEqual(["list", "--outdated"]);
     await tui.handleInput("right");
     expect(tui.state.command).toBe("refresh");
@@ -313,7 +320,7 @@ describe("Mason TUI core", () => {
     await tui.handleInput("enter");
 
     expect(tui.render()).toContain("typescript-language-server");
-    expect(tui.render()).not.toContain("> stylua");
+    expect(tui.render()).not.toContain("▶ stylua");
     expect(calls).toEqual([["list"]]);
 
     await tui.handleInput("/");
