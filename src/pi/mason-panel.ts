@@ -1,30 +1,48 @@
-import type { CliBridge } from "./cli";
+import type { CliBridge, CliRunOptions } from "./cli";
 import { createMasonTui, type MasonTui, type MasonTuiHost, type MasonTuiState, type MasonTuiStyle } from "../tui/mason-tui";
+import type { MasonResultKind } from "./mason-render";
 
 export type MasonPanelState = MasonTuiState;
 export type MasonPanel = MasonTui;
 
+export interface MasonPanelInitialCommand {
+  argv: string[];
+  resultKind: MasonResultKind;
+  title: string;
+  syncAfterPackageChange?: boolean;
+  preservePackage?: string;
+}
+
 export interface MasonPanelOptions {
   syncLspConfig?: () => unknown;
   notify?: (message: string, level?: "info" | "error") => unknown;
+  requestRender?: () => unknown;
+  onLongOperationStart?: (promise: Promise<unknown>) => unknown;
+  progressTimeoutMs?: number;
+  initialCommand?: MasonPanelInitialCommand;
 }
 
 export function createMasonPanel(bridge: CliBridge, options: MasonPanelOptions = {}): MasonPanel {
-  return createMasonTui(masonPanelHost(bridge, options));
+  return createMasonTui(masonPanelHost(bridge, options), options.progressTimeoutMs === undefined ? undefined : { progressTimeoutMs: options.progressTimeoutMs });
 }
 
 export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: MasonPanelOptions = {}): Promise<MasonPanel> {
+  let activeTui: unknown;
+  let activeComponent: { invalidate?: () => unknown } | undefined;
+  const requestRender = () => {
+    requestPanelRender(activeTui, activeComponent);
+    options.requestRender?.();
+  };
   const panel = createMasonPanel(bridge, {
     ...options,
     notify: options.notify ?? ((message, level) => notifyFromContext(ctx, message, level)),
+    requestRender,
   });
 
   const anyCtx = ctx as { hasUI?: boolean; ui?: { custom?: (factory: Function, options?: unknown) => unknown } };
   if (anyCtx.hasUI !== false && typeof anyCtx.ui?.custom === "function") {
     panel.state.loading = true;
-    panel.state.model = { kind: "summary", title: "mason list", lines: ["Loading..."] };
-    let activeTui: unknown;
-    let activeComponent: { invalidate?: () => unknown } | undefined;
+    panel.state.model = { kind: "summary", title: options.initialCommand?.title ?? "mason list", lines: ["Loading..."] };
     let initialLoadStarted = false;
     let closed = false;
     const startInitialLoad = () => {
@@ -32,10 +50,8 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
       initialLoadStarted = true;
       setTimeout(() => {
         if (closed) return;
-        void panel.runCurrent().then(
-          () => requestPanelRender(activeTui, activeComponent),
-          () => requestPanelRender(activeTui, activeComponent),
-        );
+        const running = runInitialPanelCommand(panel, options.initialCommand);
+        void running.then(requestRender, requestRender);
       }, 0);
     };
     await anyCtx.ui.custom((tui: unknown, theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {
@@ -71,21 +87,45 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
         margin: { top: 0, right: 0, bottom: 0, left: 0 },
       },
     });
+  } else if (options.initialCommand) {
+    await runInitialPanelCommand(panel, options.initialCommand);
   } else {
     await panel.runCurrent();
   }
   return panel;
 }
 
+function runInitialPanelCommand(panel: MasonPanel, initial: MasonPanelInitialCommand | undefined): Promise<MasonPanelState> {
+  if (!initial) return panel.runCurrent();
+  const options: { syncAfterPackageChange?: boolean; preservePackage?: string } = {};
+  if (initial.syncAfterPackageChange) options.syncAfterPackageChange = true;
+  if (initial.preservePackage !== undefined) options.preservePackage = initial.preservePackage;
+  return panel.runProgress(initial.argv, initial.resultKind, initial.title, options);
+}
+
 function masonPanelHost(bridge: CliBridge, options: MasonPanelOptions): MasonTuiHost {
   const host: MasonTuiHost = {
-    runCli(args: string[]) {
-      return bridge.run(args);
+    runCli(args: string[], runOptions) {
+      const bridgeOptions: CliRunOptions | undefined = runOptions ? {
+        ...runOptions,
+        onProgress(event) {
+          runOptions.onProgress?.(event);
+          options.requestRender?.();
+        },
+      } : undefined;
+      const promise = bridge.run(args, bridgeOptions);
+      if (isLongOperationArgs(args)) options.onLongOperationStart?.(promise);
+      return promise;
     },
   };
   if (options.syncLspConfig) host.syncAfterPackageChange = options.syncLspConfig;
   if (options.notify) host.notify = options.notify;
   return host;
+}
+
+function isLongOperationArgs(args: readonly string[]): boolean {
+  const command = args[0];
+  return command === "install" || command === "update" || command === "uninstall" || command === "refresh";
 }
 
 function notifyFromContext(ctx: unknown, message: string, level?: "info" | "error"): void {

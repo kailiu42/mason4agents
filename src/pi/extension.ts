@@ -1,7 +1,7 @@
 import { createCliBridge } from "./cli";
 import type { CliBridge } from "./cli";
 import { executeMasonCommand, parseMasonCommandInput } from "./mason-command";
-import { openMasonPanel } from "./mason-panel";
+import { openMasonPanel, type MasonPanelInitialCommand } from "./mason-panel";
 import { modelSupportsFiltering, renderDisplay, renderDisplayText, type DisplayModel } from "./mason-render";
 import { registerPiTools } from "./pi-tools";
 import { ensureMasonBinOnPath } from "./path-env";
@@ -21,23 +21,51 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
   syncMasonLspConfig();
   const apiCtx = ctx;
   const cliBridge = bridge ?? createCliBridge(undefined, extensionStartUrl(ctx));
+  const syncAfterPackageChange = () => {
+    syncOmpLspDefaultsCache();
+    syncMasonLspConfig();
+  };
+  let activeLongOperation: Promise<void> | undefined;
+  const trackLongOperation = (promise: Promise<unknown>) => {
+    const tracked = promise.then(
+      () => undefined,
+      () => undefined,
+    );
+    activeLongOperation = tracked;
+    void tracked.finally(() => {
+      if (activeLongOperation === tracked) activeLongOperation = undefined;
+    });
+  };
   registerCommand(ctx, "mason", "Open mason4agents package manager", async (args, commandCtx) => {
     const restoreWorking = suppressLocalCommandWorking(commandCtx);
     try {
       const input = typeof args === "string" ? args.trim() : "";
       const shownInUi = canShowCustomUi(commandCtx);
       if (input.length === 0) {
-        const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncMasonLspConfig });
+        const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncAfterPackageChange, onLongOperationStart: trackLongOperation });
         if (!shownInUi) {
           publishMessage(apiCtx, "mason4agents", panel.render());
         }
         return;
       }
 
+      const initialCommand = directLongMasonCommand(input);
+      if (shownInUi && initialCommand) {
+        if (activeLongOperation) {
+          reportLongOperationBlocked(commandCtx, apiCtx);
+          return;
+        }
+        await openMasonPanel(commandCtx, cliBridge, {
+          syncLspConfig: syncAfterPackageChange,
+          initialCommand,
+          onLongOperationStart: trackLongOperation,
+        });
+        return;
+      }
+
       const model = await executeMasonCommand(input, cliBridge);
       if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
-        syncOmpLspDefaultsCache();
-        syncMasonLspConfig();
+        syncAfterPackageChange();
       }
       publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
     } catch (err) {
@@ -182,6 +210,50 @@ function reportCommandError(commandCtx: unknown, apiCtx: unknown, command: strin
   }
 }
 
+function directLongMasonCommand(input: string): MasonPanelInitialCommand | undefined {
+  let parsed: ReturnType<typeof parseMasonCommandInput>;
+  try {
+    parsed = parseMasonCommandInput(input);
+  } catch {
+    return undefined;
+  }
+  if (parsed.kind !== "command") return undefined;
+  if (parsed.command !== "install" && parsed.command !== "update" && parsed.command !== "uninstall" && parsed.command !== "refresh") return undefined;
+  const initial: MasonPanelInitialCommand = {
+    argv: parsed.argv,
+    resultKind: parsed.resultKind,
+    title: parsed.title,
+  };
+  if (parsed.command === "install" || parsed.command === "update" || parsed.command === "uninstall") {
+    initial.syncAfterPackageChange = true;
+    const packageName = firstPackageArgument(parsed.argv);
+    if (packageName !== undefined) initial.preservePackage = packageName;
+  }
+  return initial;
+}
+
+function firstPackageArgument(argv: readonly string[]): string | undefined {
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (token === "--registry") {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--")) continue;
+    return token;
+  }
+  return undefined;
+}
+
+function reportLongOperationBlocked(commandCtx: unknown, apiCtx: unknown): void {
+  const message = "A mason4agents operation is already running; wait for it to finish before starting another.";
+  const anyCommandCtx = commandCtx as { ui?: { notify?: (message: string, level?: string) => unknown } };
+  if (typeof anyCommandCtx.ui?.notify === "function") {
+    anyCommandCtx.ui.notify(message, "error");
+  } else {
+    publishMessage(apiCtx, "mason4agents", message);
+  }
+}
 function shouldSyncLspConfigAfterMasonCommand(input: string): boolean {
   try {
     const parsed = parseMasonCommandInput(input);

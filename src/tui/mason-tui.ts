@@ -27,6 +27,43 @@ export type MasonTuiEdit =
 
 export type MasonTuiView = "list" | "detail";
 
+export interface MasonTuiProgressEvent {
+  kind: "progress";
+  schema_version: 1;
+  operation: string;
+  phase: string;
+  status: "started" | "running" | "succeeded" | "failed" | "skipped";
+  package?: string;
+  message: string;
+  elapsed_ms: number;
+  total_bytes?: number;
+  downloaded_bytes?: number;
+  download_percent?: number;
+  bytes_per_second?: number;
+}
+
+export interface MasonTuiRunOptions {
+  onProgress?: (event: MasonTuiProgressEvent) => void;
+}
+
+export interface MasonTuiProgressState {
+  title: string;
+  argv: readonly string[];
+  active: boolean;
+  done: boolean;
+  error: boolean;
+  timedOut: boolean;
+  dismissed: boolean;
+  timeoutMs: number;
+  startedAt: number;
+  lastProgressAt: number;
+  events: MasonTuiProgressEvent[];
+  finalModel: DisplayModel | undefined;
+  popupBodyLines: number | undefined;
+  popupScroll: number;
+  followTail: boolean;
+}
+
 export interface MasonTuiState {
   command: MasonTuiCommandId;
   commandIndex: number;
@@ -49,12 +86,17 @@ export interface MasonTuiState {
   lastTableKind: MasonResultKind | undefined;
   lastAction?: unknown;
   notice: string | undefined;
+  progress: MasonTuiProgressState | undefined;
 }
 
 export interface MasonTuiHost {
-  runCli(args: string[]): Promise<unknown>;
+  runCli(args: string[], options?: MasonTuiRunOptions): Promise<unknown>;
   syncAfterPackageChange?: () => unknown;
   notify?: (message: string, level?: "info" | "error") => unknown;
+}
+
+export interface MasonTuiOptions {
+  progressTimeoutMs?: number;
 }
 
 export interface MasonTuiStyle extends RenderStyle {
@@ -88,6 +130,7 @@ export interface MasonTui {
   update(packages?: string[]): Promise<MasonTuiState>;
   doctor(): Promise<MasonTuiState>;
   runCurrent(): Promise<MasonTuiState>;
+  runProgress(args: string[], resultKind: MasonResultKind, title: string, options?: { syncAfterPackageChange?: boolean; preservePackage?: string }): Promise<MasonTuiState>;
   handleInput(...keys: unknown[]): Promise<"close" | void>;
   render(): string;
   renderLines(width: number, style?: MasonTuiStyle): string[];
@@ -114,11 +157,13 @@ export const MASON_TUI_COMMANDS: readonly MasonTuiCommand[] = MASON_TUI_COMMAND_
 const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 const PANEL_MAX_ROWS = 18;
 const PANEL_DISPLAY_MIN_LINES = PANEL_MAX_ROWS + 4;
+const PROGRESS_POPUP_MIN_BODY_LINES = 16;
 const LIVE_NAME_FILTER_MIN_CHARS = 3;
 const PICKER_MAX_ROWS = 10;
 const TAB_SEPARATOR = "  ╱  ";
 
-export function createMasonTui(host: MasonTuiHost): MasonTui {
+export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}): MasonTui {
+  const progressTimeoutMs = options.progressTimeoutMs ?? 30_000;
   const state: MasonTuiState = {
     command: "list",
     commandIndex: commandIndex("list"),
@@ -140,6 +185,7 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
     activeItems: [],
     lastTableKind: "packages",
     notice: undefined,
+    progress: undefined,
   };
   let commandRunId = 0;
 
@@ -179,14 +225,48 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
     }
     return state;
   }
+  async function runWithProgress(planned: MasonTuiInvocation, preservePackage: string | undefined = undefined): Promise<MasonTuiState> {
+    const runId = nextCommandRunId();
+    const progress = createProgressState(planned, progressTimeoutMs);
+    state.progress = progress;
+    state.loading = true;
+    state.view = "list";
+    state.edit = undefined;
+    state.notice = undefined;
+    syncActiveRows(state);
+    try {
+      const data = await host.runCli(planned.argv, {
+        onProgress(event) {
+          if (!isCurrentCommandRun(runId)) return;
+          appendProgressEvent(progress, event);
+        },
+      });
+      if (!isCurrentCommandRun(runId)) return state;
+      state.lastAction = data;
+      if (planned.syncAfterPackageChange) host.syncAfterPackageChange?.();
+      const finalModel = modelForResult(planned.resultKind, data, planned.title);
+      completeProgress(progress, finalModel, false);
+      if (preservePackage !== undefined) state.selectedPackage = preservePackage;
+    } catch (err) {
+      if (!isCurrentCommandRun(runId)) return state;
+      const finalModel = errorDisplay(planned.title, messageFromError(err));
+      completeProgress(progress, finalModel, true);
+    } finally {
+      if (isCurrentCommandRun(runId)) {
+        state.loading = false;
+        syncActiveRows(state);
+      }
+    }
+    return state;
+  }
 
   const tui: MasonTui = {
     title: "mason4agents",
     state,
     async refresh() {
-      const refreshResult = await host.runCli(["refresh"]);
-      state.lastAction = refreshResult;
-      return this.search(state.query, { category: state.category, language: state.language });
+      await runWithProgress({ argv: ["refresh"], resultKind: "refresh", title: "mason refresh" });
+      if (!state.progress?.error) await this.search(state.query, { category: state.category, language: state.language });
+      return state;
     },
     async search(query = "", filters: { category: string | undefined; language: string | undefined } = { category: undefined, language: undefined }) {
       state.commandIndex = commandIndex("search");
@@ -200,19 +280,19 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
       return execute(buildSearchInvocation(state));
     },
     async install(packages: string[]) {
-      state.lastAction = await host.runCli(["install", ...packages]);
-      host.syncAfterPackageChange?.();
-      return this.search(state.query, { category: state.category, language: state.language });
+      await runWithProgress({ argv: ["install", ...packages], resultKind: "install", title: "mason install", syncAfterPackageChange: true }, packages[0]);
+      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      return state;
     },
     async uninstall(packages: string[]) {
-      state.lastAction = await host.runCli(["uninstall", ...packages]);
-      host.syncAfterPackageChange?.();
-      return this.search(state.query, { category: state.category, language: state.language });
+      await runWithProgress({ argv: ["uninstall", ...packages], resultKind: "uninstall", title: "mason uninstall", syncAfterPackageChange: true }, packages[0]);
+      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      return state;
     },
     async update(packages: string[] = []) {
-      state.lastAction = await host.runCli(["update", ...packages]);
-      host.syncAfterPackageChange?.();
-      return this.search(state.query, { category: state.category, language: state.language });
+      await runWithProgress({ argv: ["update", ...packages], resultKind: "install", title: "mason update", syncAfterPackageChange: true }, packages[0]);
+      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      return state;
     },
     async doctor() {
       state.commandIndex = commandIndex("doctor");
@@ -222,7 +302,8 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
     },
     async runCurrent() {
       try {
-        return await execute(buildInvocation(state));
+        const planned = buildInvocation(state);
+        return isProgressInvocation(planned) ? await runWithProgress(planned) : await execute(planned);
       } catch (err) {
         nextCommandRunId();
         state.model = errorDisplay("mason4agents", messageFromError(err));
@@ -232,9 +313,17 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
         return state;
       }
     },
+    async runProgress(args: string[], resultKind: MasonResultKind, title: string, runOptions: { syncAfterPackageChange?: boolean; preservePackage?: string } = {}) {
+      const planned: MasonTuiInvocation = { argv: args, resultKind, title };
+      if (runOptions.syncAfterPackageChange) planned.syncAfterPackageChange = true;
+      await runWithProgress(planned, runOptions.preservePackage);
+      if (runOptions.syncAfterPackageChange && !state.progress?.error) await refreshAfterPackageChange(state, host, runOptions.preservePackage);
+      return state;
+    },
     async handleInput(...rawKeys: unknown[]) {
       const key = normalizeInputKey(...rawKeys);
       if (key.length === 0) return;
+      if (handleProgressInput(state, key)) return;
       if (state.edit) {
         await handleEditKey(state, key, () => tui.runCurrent());
         syncActiveRows(state);
@@ -260,7 +349,7 @@ export function createMasonTui(host: MasonTuiHost): MasonTui {
         return;
       }
       if (isPackageActionKey(key)) {
-        await runPackageAction(state, host, key);
+        await runPackageAction(state, host, key, runWithProgress);
         return;
       }
       if (state.view === "detail") return;
@@ -331,6 +420,131 @@ interface MasonTuiInvocation {
   resultKind: MasonResultKind;
   title: string;
   syncAfterPackageChange?: boolean;
+}
+
+type MasonTuiProgressRunner = (planned: MasonTuiInvocation, preservePackage?: string) => Promise<MasonTuiState>;
+
+function isProgressInvocation(planned: MasonTuiInvocation): boolean {
+  const command = planned.argv[0];
+  return command === "install" || command === "update" || command === "uninstall" || command === "refresh";
+}
+
+function createProgressState(planned: MasonTuiInvocation, timeoutMs: number): MasonTuiProgressState {
+  const now = Date.now();
+  return {
+    title: planned.title,
+    argv: planned.argv,
+    active: true,
+    done: false,
+    error: false,
+    timedOut: false,
+    dismissed: false,
+    timeoutMs,
+    startedAt: now,
+    lastProgressAt: now,
+    events: [],
+    finalModel: undefined,
+    popupBodyLines: undefined,
+    popupScroll: 0,
+    followTail: true,
+  };
+}
+
+function appendProgressEvent(progress: MasonTuiProgressState, event: MasonTuiProgressEvent): void {
+  progress.events.push(event);
+  if (progress.events.length > 80) progress.events.splice(0, progress.events.length - 80);
+  progress.lastProgressAt = Date.now();
+  progress.timedOut = false;
+}
+
+function completeProgress(progress: MasonTuiProgressState, finalModel: DisplayModel, error: boolean): void {
+  progress.active = false;
+  progress.done = true;
+  progress.error = error;
+  progress.timedOut = false;
+  progress.dismissed = false;
+  progress.finalModel = finalModel;
+  progress.lastProgressAt = Date.now();
+  progress.popupScroll = 0;
+  progress.followTail = false;
+}
+
+function updateProgressTimeout(progress: MasonTuiProgressState): void {
+  if (!progress.active || progress.done || progress.dismissed || progress.timedOut) return;
+  if (Date.now() - progress.lastProgressAt >= progress.timeoutMs) progress.timedOut = true;
+}
+
+function handleProgressInput(state: MasonTuiState, key: string): boolean {
+  const progress = state.progress;
+  if (!progress) return false;
+  updateProgressTimeout(progress);
+  if (handleProgressScroll(progress, key)) return true;
+  if (progress.active) {
+    if (!progress.dismissed && progress.timedOut && (isQuitKey(key) || isBackKey(key))) {
+      progress.dismissed = true;
+    }
+    return true;
+  }
+  if (!progress.dismissed) {
+    if (isQuitKey(key) || isBackKey(key)) {
+      if (shouldPromoteProgressFinalModel(state, progress)) applyDisplayModel(state, progress.finalModel);
+      state.progress = undefined;
+    }
+    return true;
+  }
+  return false;
+}
+
+function handleProgressScroll(progress: MasonTuiProgressState, key: string): boolean {
+  const pageSize = Math.max(1, (progress.popupBodyLines ?? PROGRESS_POPUP_MIN_BODY_LINES) - 6);
+  if (isScrollDownKey(key)) {
+    progress.followTail = false;
+    progress.popupScroll += 1;
+    return true;
+  }
+  if (isScrollUpKey(key)) {
+    progress.followTail = false;
+    progress.popupScroll = Math.max(0, progress.popupScroll - 1);
+    return true;
+  }
+  if (isPageDownKey(key)) {
+    progress.followTail = false;
+    progress.popupScroll += pageSize;
+    return true;
+  }
+  if (isPageUpKey(key)) {
+    progress.followTail = false;
+    progress.popupScroll = Math.max(0, progress.popupScroll - pageSize);
+    return true;
+  }
+  if (key === "g") {
+    progress.followTail = false;
+    progress.popupScroll = 0;
+    return true;
+  }
+  if (key === "G") {
+    progress.followTail = true;
+    return true;
+  }
+  return false;
+}
+
+function shouldPromoteProgressFinalModel(
+  state: MasonTuiState,
+  progress: MasonTuiProgressState,
+): progress is MasonTuiProgressState & { finalModel: DisplayModel } {
+  return progress.finalModel !== undefined && isLoadingSummaryModel(state.model);
+}
+
+function isLoadingSummaryModel(model: DisplayModel): boolean {
+  return model.kind === "summary" && model.lines.length === 1 && model.lines[0] === "Loading...";
+}
+
+function applyDisplayModel(state: MasonTuiState, model: DisplayModel): void {
+  state.model = model;
+  state.tableItems = [];
+  state.lastTableKind = undefined;
+  syncActiveRows(state);
 }
 
 function initialInputs(): Record<MasonTuiCommandId, string> {
@@ -439,6 +653,7 @@ export function renderMasonTuiLines(state: MasonTuiState, width: number, style: 
   lines.push(...padDisplayLines(displayLines, safeWidth, PANEL_DISPLAY_MIN_LINES));
   lines.push(shortcutHelp(state, safeWidth, style));
   const fitted = lines.map((line) => fitToWidth(line, safeWidth));
+  if (state.progress && !state.progress.dismissed) return renderProgressPopup(state, fitted, safeWidth, style);
   if (state.view === "detail") return renderDetailPopup(state, fitted, safeWidth, style);
   return state.edit && isPickerEdit(state.edit) ? renderPickerPopup(state, fitted, safeWidth, style) : fitted;
 }
@@ -521,6 +736,149 @@ function renderDetailPopup(state: MasonTuiState, baseLines: string[], width: num
     result[target] = fitToWidth(`${" ".repeat(left)}${popupLines[index]!}`, width);
   }
   return result.map((line) => fitToWidth(line, width));
+}
+
+function renderProgressPopup(state: MasonTuiState, baseLines: string[], width: number, style: MasonTuiStyle): string[] {
+  const progress = state.progress;
+  if (!progress) return baseLines;
+  updateProgressTimeout(progress);
+  const popupWidth = Math.max(1, Math.floor(width / 2));
+  const contentWidth = Math.max(1, popupWidth - 4);
+  const contentLines = viewportProgressPopupBody(progress, renderProgressContentSections(progress, contentWidth, style), Math.max(1, baseLines.length - 6));
+  const title = progress.done ? " operation result " : " operation progress ";
+  const topBorder = `╭${title}${"─".repeat(Math.max(0, popupWidth - title.length - 2))}╮`;
+  const bottomBorder = `╰${"─".repeat(Math.max(0, popupWidth - 2))}╯`;
+  const popupLines = [
+    styleLine(fitToWidth(topBorder, popupWidth), style.popupBorder),
+    ...contentLines.map((line, index) => {
+      const bodyLine = `│ ${fitToWidth(line.trimEnd(), contentWidth)} │`;
+      return styleLine(fitToWidth(bodyLine, popupWidth), index === 0 ? style.popupTitle ?? style.popupBody : style.popupBody);
+    }),
+    styleLine(fitToWidth(bottomBorder, popupWidth), style.popupBorder),
+  ];
+  const top = Math.max(3, Math.floor((baseLines.length - popupLines.length) / 2));
+  const left = Math.max(0, Math.floor((width - popupWidth) / 2));
+  const result = [...baseLines];
+  for (let index = 0; index < popupLines.length; index += 1) {
+    const target = top + index;
+    if (target >= result.length) result.push(fitToWidth("", width));
+    result[target] = fitToWidth(`${" ".repeat(left)}${popupLines[index]!}`, width);
+  }
+  return result.map((line) => fitToWidth(line, width));
+}
+
+function viewportProgressPopupBody(
+  progress: MasonTuiProgressState,
+  sections: { head: string[]; middle: string[]; foot: string[] },
+  maxBodyLines: number,
+): string[] {
+  const targetLineCount = lockProgressPopupHeight(progress, sections, maxBodyLines);
+  const middleViewportSize = Math.max(1, targetLineCount - sections.head.length - sections.foot.length);
+  const middleLines = renderProgressViewportMiddle(progress, sections.middle, middleViewportSize);
+  return [
+    ...sections.head,
+    ...middleLines,
+    ...sections.foot,
+  ];
+}
+
+function lockProgressPopupHeight(
+  progress: MasonTuiProgressState,
+  sections: { head: string[]; middle: string[]; foot: string[] },
+  maxBodyLines: number,
+): number {
+  if (progress.popupBodyLines === undefined) {
+    const initialLines = sections.head.length + sections.middle.length + sections.foot.length;
+    progress.popupBodyLines = clamp(
+      Math.max(initialLines, PROGRESS_POPUP_MIN_BODY_LINES),
+      sections.head.length + sections.foot.length + 1,
+      maxBodyLines,
+    );
+  } else {
+    progress.popupBodyLines = clamp(
+      progress.popupBodyLines,
+      sections.head.length + sections.foot.length + 1,
+      maxBodyLines,
+    );
+  }
+  return progress.popupBodyLines;
+}
+
+function renderProgressViewportMiddle(
+  progress: MasonTuiProgressState,
+  lines: string[],
+  viewportSize: number,
+): string[] {
+  if (lines.length <= viewportSize) {
+    return [
+      ...lines,
+      ...Array.from({ length: viewportSize - lines.length }, () => ""),
+    ];
+  }
+
+  const maxScroll = lines.length - viewportSize;
+  const start = progress.followTail ? maxScroll : clamp(progress.popupScroll, 0, maxScroll);
+  progress.popupScroll = start;
+  progress.followTail = start === maxScroll && progress.followTail;
+  const visible = lines.slice(start, start + viewportSize);
+
+  if (start > 0) visible[0] = visible[0]!.length === 0 ? "↑" : `↑ ${visible[0]!}`;
+  if (start + viewportSize < lines.length) {
+    const last = viewportSize - 1;
+    visible[last] = visible[last]!.length === 0 ? "↓" : `↓ ${visible[last]}`;
+  }
+
+  return visible;
+}
+
+function renderProgressContentSections(
+  progress: MasonTuiProgressState,
+  width: number,
+  style: MasonTuiStyle,
+): { head: string[]; middle: string[]; foot: string[] } {
+  const head = [
+    fitToWidth(`Command: ${progress.argv.join(" ")}`, width),
+    fitToWidth(progressStatusLine(progress), width),
+    "",
+  ];
+
+  const middle: string[] = [];
+  if (progress.events.length === 0) {
+    middle.push("Waiting for CLI progress...");
+  } else {
+    middle.push("Progress:");
+    for (let index = 0; index < progress.events.length; index += 1) {
+      middle.push(formatProgressEvent(progress.events[index]!));
+    }
+  }
+
+  if (progress.finalModel) {
+    middle.push("");
+    middle.push(...renderDisplay(progress.finalModel, { width, maxRows: 8, fixedHeight: false, showTitle: true, showHelp: false, style }));
+  }
+
+  const foot = [""];
+  if (progress.active && progress.timedOut) {
+    foot.push(`No progress for ${Math.ceil(progress.timeoutMs / 1000)}s. The CLI is still running.`);
+    foot.push(renderShortcutLine("", [["[↑↓/Pg]", "scroll"], ["[q]/[Esc]", "close panel; otherwise keep waiting"]], width, style));
+  } else if (progress.active) {
+    foot.push("Further Mason operations are blocked until this command exits.");
+    foot.push(renderShortcutLine("", [["[↑↓/Pg]", "scroll"]], width, style));
+  } else {
+    foot.push(renderShortcutLine("", [["[↑↓/Pg]", "scroll"], ["[q]/[Esc]", "close"]], width, style));
+  }
+  return { head, middle, foot };
+}
+
+function progressStatusLine(progress: MasonTuiProgressState): string {
+  if (progress.active && progress.timedOut) return "Status: no recent progress";
+  if (progress.active) return "Status: running";
+  return progress.error ? "Status: failed" : "Status: completed";
+}
+
+function formatProgressEvent(event: MasonTuiProgressEvent): string {
+  const subject = event.package ? `${event.package} ` : "";
+  return `• ${event.status} ${subject}${event.phase}: ${event.message}`;
 }
 
 function renderPickerPopup(state: MasonTuiState, baseLines: string[], width: number, style: MasonTuiStyle): string[] {
@@ -956,7 +1314,7 @@ function isPickerEdit(edit: MasonTuiEdit): edit is Extract<MasonTuiEdit, { kind:
   return edit.kind === "language" || edit.kind === "category";
 }
 
-async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: string): Promise<void> {
+async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: string, runWithProgress: MasonTuiProgressRunner): Promise<void> {
   syncActiveRows(state);
   const name = selectedPackageName(state);
   const selected = selectedEntry(state);
@@ -971,7 +1329,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
       setNotice(state, host, `${name} is already installed. ${shortcutText([["[u]", "update"]])}`, "error");
       return;
     }
-    await runPackageCommand(state, host, ["install", name], name, "Installed");
+    await runPackageCommand(state, host, runWithProgress, ["install", name], name);
     return;
   }
   if (key === "u" || key === "U") {
@@ -979,40 +1337,35 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
       setNotice(state, host, `${name} is not installed. ${shortcutText([["[i]", "install"]])}`, "error");
       return;
     }
-    await runPackageCommand(state, host, ["update", name], name, "Updated");
+    await runPackageCommand(state, host, runWithProgress, ["update", name], name);
     return;
   }
   if (!installed) {
     setNotice(state, host, `${name} is not installed.`, "error");
     return;
   }
-  await runPackageCommand(state, host, ["uninstall", name], name, "Uninstalled");
+  await runPackageCommand(state, host, runWithProgress, ["uninstall", name], name);
 }
 
-async function runPackageCommand(state: MasonTuiState, host: MasonTuiHost, argv: string[], packageName: string, pastTense: string): Promise<void> {
-  state.loading = true;
-  state.notice = `${argv[0]} ${packageName}...`;
-  try {
-    state.lastAction = await host.runCli(argv);
-    host.syncAfterPackageChange?.();
-    await refreshAfterPackageChange(state, host, packageName);
-    setNotice(state, host, `${pastTense} ${packageName}.`, "info");
-  } catch (err) {
-    const message = messageFromError(err);
-    state.model = errorDisplay(`mason ${argv[0]}`, message);
-    state.tableItems = [];
-    setNotice(state, host, message, "error");
-  } finally {
-    state.loading = false;
-    syncActiveRows(state);
-  }
+async function runPackageCommand(
+  state: MasonTuiState,
+  host: MasonTuiHost,
+  runWithProgress: MasonTuiProgressRunner,
+  argv: string[],
+  packageName: string,
+): Promise<void> {
+  const command = argv[0] ?? "install";
+  const resultKind: MasonResultKind = command === "uninstall" ? "uninstall" : "install";
+  await runWithProgress({ argv, resultKind, title: `mason ${command} ${packageName}`, syncAfterPackageChange: true }, packageName);
+  if (state.progress?.error) return;
+  await refreshAfterPackageChange(state, host, packageName);
 }
 
-async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string): Promise<void> {
-  state.selectedPackage = packageName;
+async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string | undefined): Promise<void> {
+  if (packageName) state.selectedPackage = packageName;
   if (state.command === "search" || state.command === "list" || state.command === "suggested" || state.command === "installed" || state.command === "update") {
     const planned = buildInvocation(state);
-    state.model = { kind: "summary", title: planned.title, lines: ["Loading..."] };
+    if (!state.progress || state.progress.dismissed) state.model = { kind: "summary", title: planned.title, lines: ["Loading..."] };
     const data = await host.runCli(planned.argv);
     state.lastAction = data;
     state.model = modelForResult(planned.resultKind, data, planned.title);

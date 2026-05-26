@@ -14,8 +14,21 @@ afterEach(() => {
 function bridge() {
   const calls: string[][] = [];
   const fake: CliBridge = {
-    async run(args: string[]) {
+    async run(args: string[], options) {
       calls.push(args);
+      const command = args[0];
+      if (command === "install" || command === "update" || command === "uninstall" || command === "refresh") {
+        options?.onProgress?.({
+          kind: "progress",
+          schema_version: 1,
+          operation: command,
+          phase: command === "refresh" ? "registry" : "package",
+          status: "running",
+          ...(args[1] === undefined ? {} : { package: args[1] }),
+          message: `${command} running`,
+          elapsed_ms: 1,
+        });
+      }
       if (args[0] === "search") {
         return [
           {
@@ -120,6 +133,11 @@ function bridge() {
           managers: [{ source_type: "npm", available: true }],
         };
       }
+      if (args[0] === "install" || args[0] === "update") {
+        return [{ package: args[1], version: "v1.0.0", source_id: `pkg:generic/acme/${args[1]}@v1.0.0`, bins: {}, package_dir: `/tmp/${args[1]}` }];
+      }
+      if (args[0] === "uninstall") return [{ package: args[1], removed: true }];
+      if (args[0] === "refresh") return { source: "fixture", package_count: 2, cache_file: "/tmp/registry.json", checksum: "abc" };
       return { args };
     }
   };
@@ -425,6 +443,85 @@ describe("Pi extension", () => {
     }
   });
 
+  test("direct long command opens progress panel and blocks another long command", async () => {
+    const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const notifications: string[] = [];
+    const calls: string[][] = [];
+    let resolveInstall!: (value: unknown) => void;
+    let customCalls = 0;
+    let component: { render(width: number): string[]; handleInput(...keys: unknown[]): void } | undefined;
+    const fake: CliBridge = {
+      run(args, options) {
+        calls.push(args);
+        if (args[0] === "install") {
+          options?.onProgress?.({
+            kind: "progress",
+            schema_version: 1,
+            operation: "install",
+            phase: "download",
+            status: "running",
+            package: "stylua",
+            message: "downloaded 256 KiB / 1.0 MiB (25.0%) at 128 KiB/s",
+            elapsed_ms: 1,
+            total_bytes: 1048576,
+            downloaded_bytes: 262144,
+            download_percent: 25,
+            bytes_per_second: 131072,
+          });
+          return new Promise((resolve) => { resolveInstall = resolve; });
+        }
+        if (args[0] === "list") return Promise.resolve([]);
+        return Promise.resolve({ args });
+      },
+    };
+    const ctx = {
+      commands: {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+          handlers[name] = options.handler;
+        },
+      },
+      tools: { registerTool() {} },
+      events: { on() {} },
+      sendMessage() {},
+    };
+    const commandCtx = {
+      hasUI: true,
+      ui: {
+        custom(factory: Function) {
+          customCalls += 1;
+          component = factory({ requestRender() {} }, fakeTheme(), undefined, () => {});
+        },
+        notify(message: string) {
+          notifications.push(message);
+        },
+        setWorkingVisible() {},
+      },
+    };
+
+    await activate(ctx, fake);
+    await handlers.mason?.("install stylua", commandCtx);
+    expect(customCalls).toBe(1);
+    expect(calls).toEqual([]);
+
+    expect(component?.render(80).join("\n")).toContain("Loading...");
+    await waitForInitialPanelLoad();
+    expect(calls).toEqual([["install", "stylua"]]);
+    const progressLines = (component?.render(120) as string[]).map(stripAnsi);
+    expect(progressLines.join("\n")).toContain("operation progress");
+    const progressTitleLine = progressLines.find((line) => line.includes("operation progress"));
+    expect(progressTitleLine?.trim().length).toBe(60);
+
+    await handlers.mason?.("update stylua", commandCtx);
+    expect(notifications[0]).toContain("already running");
+    expect(customCalls).toBe(1);
+    expect(calls).toEqual([["install", "stylua"]]);
+
+    resolveInstall([{ package: "stylua", version: "v2.0.0", source_id: "pkg:generic/acme/stylua@v2.0.0", bins: {}, package_dir: "/tmp/stylua" }]);
+    await waitForInitialPanelLoad();
+    expect(calls).toEqual([["install", "stylua"], ["list"]]);
+    expect(component?.render(80).join("\n")).toContain("operation result");
+    expect(component?.render(80).join("\n")).toContain("stylua");
+  });
   test("direct command errors publish and return without opening custom UI", async () => {
     const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
     roots.push(root);

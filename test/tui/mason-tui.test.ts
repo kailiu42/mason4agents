@@ -42,8 +42,21 @@ function host() {
   const calls: string[][] = [];
   let syncs = 0;
   const fake: MasonTuiHost = {
-    async runCli(args: string[]) {
+    async runCli(args: string[], options) {
       calls.push(args);
+      const command = args[0];
+      if (command === "install" || command === "update" || command === "uninstall" || command === "refresh") {
+        options?.onProgress?.({
+          kind: "progress",
+          schema_version: 1,
+          operation: command,
+          phase: command === "refresh" ? "registry" : "package",
+          status: "running",
+          ...(args[1] === undefined ? {} : { package: args[1] }),
+          message: `${command} running`,
+          elapsed_ms: 1,
+        });
+      }
       if (args[0] === "search") return packages();
       if (args[0] === "suggested") return suggestions();
       if (args[0] === "list" && args.includes("--installed")) {
@@ -57,6 +70,9 @@ function host() {
         ];
       }
       if (args[0] === "list") return packages();
+      if (args[0] === "install" || args[0] === "update") return [{ package: args[1], version: "v1.0.0", source_id: `pkg:generic/acme/${args[1]}@v1.0.0`, bins: {}, package_dir: `/tmp/${args[1]}` }];
+      if (args[0] === "uninstall") return [{ package: args[1], removed: true }];
+      if (args[0] === "refresh") return { source: "fixture", package_count: 2, cache_file: "/tmp/registry.json", checksum: "abc" };
       return { args };
     },
     syncAfterPackageChange() {
@@ -262,9 +278,14 @@ describe("Mason TUI core", () => {
     await tui.runCurrent();
 
     await tui.handleInput("i");
+    expect(tui.render()).toContain("operation result");
+    expect(tui.render()).toContain("mason install stylua");
+    await tui.handleInput("q");
     await tui.handleInput("down");
     await tui.handleInput("u");
+    await tui.handleInput("q");
     await tui.handleInput("r");
+    await tui.handleInput("q");
 
     expect(calls).toContainEqual(["install", "stylua"]);
     expect(calls).toContainEqual(["update", "lua-language-server"]);
@@ -272,6 +293,230 @@ describe("Mason TUI core", () => {
     expect(syncs()).toBe(3);
   });
 
+  test("shows progress modal, blocks input, times out, and keeps final result", async () => {
+    let resolveInstall!: (value: unknown) => void;
+    const calls: string[][] = [];
+    const fake: MasonTuiHost = {
+      runCli(args, options) {
+        calls.push(args);
+        if (args[0] === "install") {
+          options?.onProgress?.({
+            kind: "progress",
+            schema_version: 1,
+            operation: "install",
+            phase: "download",
+            status: "running",
+            package: "stylua",
+            message: "downloaded 256 KiB / 1.0 MiB (25.0%) at 128 KiB/s",
+            elapsed_ms: 1,
+            total_bytes: 1048576,
+            downloaded_bytes: 262144,
+            download_percent: 25,
+            bytes_per_second: 131072,
+          });
+          return new Promise((resolve) => {
+            resolveInstall = resolve;
+          });
+        }
+        if (args[0] === "list") return Promise.resolve(packages());
+        return Promise.resolve({ args });
+      },
+      syncAfterPackageChange() {},
+    };
+    const tui = createMasonTui(fake, { progressTimeoutMs: 0 });
+
+    const pending = tui.install(["stylua"]);
+    const progressLines = tui.renderLines(80).map(stripAnsi);
+    expect(progressLines.join("\n")).toContain("operation progress");
+    expect(progressLines.join("\n")).toContain("download");
+    const progressTitleLine = progressLines.find((line) => line.includes("operation progress"));
+    expect(progressTitleLine?.trim().length).toBe(40);
+    await tui.handleInput("down");
+    expect(tui.state.selectedIndex).toBe(0);
+    expect(tui.render()).toContain("No progress for 0s");
+    await tui.handleInput("q");
+    expect(tui.render()).not.toContain("operation progress");
+
+    resolveInstall([{ package: "stylua", version: "v2.0.0", source_id: "pkg:generic/acme/stylua@v2.0.0", bins: {}, package_dir: "/tmp/stylua" }]);
+    await pending;
+
+    expect(calls).toEqual([["install", "stylua"], ["list"]]);
+    expect(tui.render()).toContain("operation result");
+    expect(tui.render()).toContain("stylua");
+    await tui.handleInput("q");
+    expect(tui.state.progress).toBeUndefined();
+  });
+  test("keeps the existing list behind the result popup while refresh is pending", async () => {
+    let resolveRefreshedList!: (value: unknown) => void;
+    let listCalls = 0;
+    const fake: MasonTuiHost = {
+      runCli(args, options) {
+        if (args[0] === "list") {
+          listCalls += 1;
+          if (listCalls === 1) return Promise.resolve(packages());
+          return new Promise((resolve) => {
+            resolveRefreshedList = resolve;
+          });
+        }
+        if (args[0] === "install") {
+          options?.onProgress?.({
+            kind: "progress",
+            schema_version: 1,
+            operation: "install",
+            phase: "package",
+            status: "running",
+            package: "stylua",
+            message: "installing",
+            elapsed_ms: 1,
+          });
+          return Promise.resolve([
+            {
+              package: "stylua",
+              version: "v2.0.0",
+              source_id: "pkg:generic/acme/stylua@v2.0.0",
+              bins: {},
+              package_dir: "/tmp/stylua",
+            },
+          ]);
+        }
+        return Promise.resolve({ args });
+      },
+      syncAfterPackageChange() {},
+    };
+    const tui = createMasonTui(fake);
+
+    await tui.runCurrent();
+    expect(tui.render()).toContain("Lua formatter");
+
+    const pending = tui.install(["stylua"]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const duringPopup = tui.render();
+    expect(duringPopup).toContain("operation result");
+    expect(duringPopup).toContain("2 packages");
+    expect(duringPopup).toContain("Description");
+    expect(duringPopup).not.toContain("Loading...");
+
+    resolveRefreshedList(packages());
+    await pending;
+  });
+  test("keeps popup height stable from active progress to result state", async () => {
+    let resolveInstall!: (value: unknown) => void;
+    let resolveList!: (value: unknown) => void;
+    const fake: MasonTuiHost = {
+      runCli(args, options) {
+        if (args[0] === "install") {
+          options?.onProgress?.({
+            kind: "progress",
+            schema_version: 1,
+            operation: "install",
+            phase: "download",
+            status: "running",
+            package: "stylua",
+            message: "downloaded 256 KiB / 1.0 MiB (25.0%) at 128 KiB/s",
+            elapsed_ms: 1,
+            total_bytes: 1048576,
+            downloaded_bytes: 262144,
+            download_percent: 25,
+            bytes_per_second: 131072,
+          });
+          return new Promise((resolve) => {
+            resolveInstall = resolve;
+          });
+        }
+        if (args[0] === "list") {
+          return new Promise((resolve) => {
+            resolveList = resolve;
+          });
+        }
+        return Promise.resolve({ args });
+      },
+      syncAfterPackageChange() {},
+    };
+    const tui = createMasonTui(fake);
+
+    const pending = tui.install(["stylua"]);
+    const activeLines = tui.renderLines(80).map(stripAnsi);
+    const activeTop = activeLines.findIndex((line) => line.includes("operation progress"));
+    const activeBottom = activeLines.findIndex((line) => line.includes("╰"));
+    expect(activeTop).toBeGreaterThanOrEqual(0);
+    expect(activeBottom).toBeGreaterThan(activeTop);
+
+    resolveInstall([
+      {
+        package: "stylua",
+        version: "v2.0.0",
+        source_id: "pkg:generic/acme/stylua@v2.0.0",
+        bins: {},
+        package_dir: "/tmp/stylua",
+      },
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const resultLines = tui.renderLines(80).map(stripAnsi);
+    const resultTop = resultLines.findIndex((line) => line.includes("operation result"));
+    const resultBottom = resultLines.findIndex((line) => line.includes("╰"));
+    expect(resultTop).toBe(activeTop);
+    expect(resultBottom).toBe(activeBottom);
+
+    resolveList(packages());
+    await pending;
+  });
+  test("scrolls long progress popup content without resizing it", async () => {
+    let resolveInstall!: (value: unknown) => void;
+    const fake: MasonTuiHost = {
+      runCli(args, options) {
+        if (args[0] === "install") {
+          for (let index = 1; index <= 20; index += 1) {
+            options?.onProgress?.({
+              kind: "progress",
+              schema_version: 1,
+              operation: "install",
+              phase: "download",
+              status: "running",
+              package: "stylua",
+              message: `chunk ${String(index).padStart(2, "0")}`,
+              elapsed_ms: index,
+            });
+          }
+          return new Promise((resolve) => {
+            resolveInstall = resolve;
+          });
+        }
+        return Promise.resolve({ args });
+      },
+    };
+    const tui = createMasonTui(fake, { progressTimeoutMs: 60_000 });
+
+    const pending = tui.runProgress(["install", "stylua"], "install", "mason install");
+    const beforeScroll = tui.renderLines(80).map(stripAnsi);
+    const beforeTop = beforeScroll.findIndex((line) => line.includes("operation progress"));
+    const beforeBottom = beforeScroll.findIndex((line) => line.includes("╰"));
+    expect(beforeScroll.join("\n")).toContain("chunk 20");
+    expect(beforeScroll.join("\n")).not.toContain("chunk 01");
+
+    await tui.handleInput("pageup");
+
+    const afterScroll = tui.renderLines(80).map(stripAnsi);
+    const afterTop = afterScroll.findIndex((line) => line.includes("operation progress"));
+    const afterBottom = afterScroll.findIndex((line) => line.includes("╰"));
+    expect(afterScroll.join("\n")).toContain("chunk 01");
+    expect(afterTop).toBe(beforeTop);
+    expect(afterBottom).toBe(beforeBottom);
+
+    resolveInstall([
+      {
+        package: "stylua",
+        version: "v2.0.0",
+        source_id: "pkg:generic/acme/stylua@v2.0.0",
+        bins: {},
+        package_dir: "/tmp/stylua",
+      },
+    ]);
+    await pending;
+  });
   test("renders suggested rows with installed marker and state-aware shortcuts", async () => {
     const { host: fake, calls } = host();
     const tui = createMasonTui(fake);
@@ -332,6 +577,7 @@ describe("Mason TUI core", () => {
     expect(calls).not.toContainEqual(["refresh"]);
     await tui.handleInput("r");
     expect(calls).toContainEqual(["refresh"]);
+    await tui.handleInput("q");
     await tui.handleInput("\x1b[9;2u");
     expect(tui.state.command).toBe("update");
     await tui.handleInput("\x1b[27;2;9~");

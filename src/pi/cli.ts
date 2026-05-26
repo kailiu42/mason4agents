@@ -7,6 +7,22 @@ export interface CliBridge {
 
 export interface CliRunOptions {
   signal?: AbortSignal;
+  onProgress?: (event: CliProgressEvent) => void;
+}
+
+export interface CliProgressEvent {
+  kind: "progress";
+  schema_version: 1;
+  operation: string;
+  phase: string;
+  status: "started" | "running" | "succeeded" | "failed" | "skipped";
+  package?: string;
+  message: string;
+  elapsed_ms: number;
+  total_bytes?: number;
+  downloaded_bytes?: number;
+  download_percent?: number;
+  bytes_per_second?: number;
 }
 
 export class MasonCliError extends Error {
@@ -40,7 +56,37 @@ export function runCliJson(binary: string, args: string[], options: CliRunOption
     const child = spawn(binary, finalArgs, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
     let stdout = "";
     let stderr = "";
+    let stderrLineBuffer = "";
     let settled = false;
+    const rejectFromProgress = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      options.signal?.removeEventListener("abort", abort);
+      child.kill("SIGTERM");
+      reject(err);
+    };
+    const handleProgressLine = (line: string) => {
+      if (!options.onProgress || settled) return;
+      const event = parseProgressEvent(line);
+      if (!event) return;
+      try {
+        options.onProgress(event);
+      } catch (err) {
+        rejectFromProgress(err);
+      }
+    };
+    const handleStderrChunk = (chunk: string) => {
+      stderr += chunk;
+      if (!options.onProgress || settled) return;
+      stderrLineBuffer += chunk;
+      for (;;) {
+        const newline = stderrLineBuffer.indexOf("\n");
+        if (newline === -1) break;
+        const line = stderrLineBuffer.slice(0, newline).replace(/\r$/, "");
+        stderrLineBuffer = stderrLineBuffer.slice(newline + 1);
+        handleProgressLine(line);
+      }
+    };
     const abort = () => {
       if (settled) return;
       child.kill("SIGTERM");
@@ -51,7 +97,7 @@ export function runCliJson(binary: string, args: string[], options: CliRunOption
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.stderr.on("data", handleStderrChunk);
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
@@ -59,6 +105,11 @@ export function runCliJson(binary: string, args: string[], options: CliRunOption
       reject(err);
     });
     child.on("close", (code) => {
+      if (settled) return;
+      if (stderrLineBuffer.length > 0) {
+        handleProgressLine(stderrLineBuffer.replace(/\r$/, ""));
+        stderrLineBuffer = "";
+      }
       if (settled) return;
       settled = true;
       options.signal?.removeEventListener("abort", abort);
@@ -94,6 +145,61 @@ function parseJson(stdout: string, stderr: string): unknown {
   } catch (cause) {
     throw new MasonCliError(`mason4agents produced invalid JSON on stdout: ${(cause as Error).message}`, "invalid_json", stdout, stderr);
   }
+}
+
+function parseProgressEvent(line: string): CliProgressEvent | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (!isCliProgressEvent(parsed)) return undefined;
+  return parsed;
+}
+
+function isCliProgressEvent(value: unknown): value is CliProgressEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const event = value as {
+    kind?: unknown;
+    schema_version?: unknown;
+    operation?: unknown;
+    phase?: unknown;
+    status?: unknown;
+    package?: unknown;
+    message?: unknown;
+    elapsed_ms?: unknown;
+    total_bytes?: unknown;
+    downloaded_bytes?: unknown;
+    download_percent?: unknown;
+    bytes_per_second?: unknown;
+  };
+  return event.kind === "progress"
+    && event.schema_version === 1
+    && typeof event.operation === "string"
+    && typeof event.phase === "string"
+    && isCliProgressStatus(event.status)
+    && (event.package === undefined || typeof event.package === "string")
+    && typeof event.message === "string"
+    && typeof event.elapsed_ms === "number"
+    && isOptionalNumber(event.total_bytes)
+    && isOptionalNumber(event.downloaded_bytes)
+    && isOptionalNumber(event.download_percent)
+    && isOptionalNumber(event.bytes_per_second);
+}
+
+function isCliProgressStatus(value: unknown): value is CliProgressEvent["status"] {
+  return value === "started"
+    || value === "running"
+    || value === "succeeded"
+    || value === "failed"
+    || value === "skipped";
+}
+
+function isOptionalNumber(value: unknown): value is number | undefined {
+  return value === undefined || typeof value === "number";
 }
 
 function isOkEnvelope(value: unknown): value is { ok: true; data: unknown } {
