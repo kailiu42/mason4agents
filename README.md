@@ -14,7 +14,7 @@ v1 supports **Pi CLI** (v0.75.5+). Future versions may add Claude Code, Codex CL
 - **Pi extension** — `/mason` interactive package manager, CLI-equivalent slash subcommands, 7 LLM-callable tools, automatic PATH injection
 - **XDG Base Directory** — data, config, cache, and state follow `$XDG_*` conventions
 - **Safe by default** — no build script execution without `--allow-build-scripts`, zip-slip protection, path traversal rejection, sandboxed temp directories with atomic rename
-- **JSON protocol** — all CLI commands support `--json` for machine-readable output
+- **JSON protocol** — all CLI commands support `--json` final envelopes; long operations stream stderr NDJSON progress with byte totals, percent complete, and current speed when available
 - **Cross-platform** — Linux, macOS, Windows (Unix symlinks on \*nix, `.cmd` wrappers on Windows)
 - **No shell profile modification** — `mason4agents env` outputs `export PATH=...` for manual sourcing
 
@@ -104,7 +104,7 @@ Open the interactive package manager in Pi:
 /mason
 ```
 
-The panel opens as a host-width, theme-aware TUI with visible tabs at the top (`list`, `suggested`, `installed`, `check update`, `refresh`, `doctor`) and a width-aware table area below. The `suggested` tab scans the local project, prefers OMP built-in LSP defaults as its LSP recommendation source, and falls back to locally cached LazyVim curated suggestions for languages OMP does not cover. Table views show installed status directly, keep a highlighted current row, and support `Tab`/`←`/`→` to switch tabs, `/` local filtering, `↑`/`↓` row selection, `Enter` for an in-place package detail popup, and state-aware package actions: `i` for missing packages, `u`/`r` for installed packages.
+The panel opens as a host-width, theme-aware TUI with visible tabs at the top (`list`, `suggested`, `installed`, `check update`, `refresh`, `doctor`) and a width-aware table area below. The `suggested` tab scans the local project, prefers OMP built-in LSP defaults as its LSP recommendation source, and falls back to locally cached LazyVim curated suggestions for languages OMP does not cover. Table views show installed status directly, keep a highlighted current row, and support `Tab`/`←`/`→` to switch tabs, `/` local filtering, `↑`/`↓` row selection, `Enter` for an in-place package detail popup, and state-aware package actions: `i` for missing packages, `u`/`r` for installed packages. Long operations (`install`, `update`, `uninstall`, `refresh`) show a modal progress panel, block additional Mason operations while the CLI runs, enter a 30s no-progress warning state where `q`/`Esc` closes the panel without killing the CLI, and keep the final result in that panel.
 
 Run CLI-equivalent slash subcommands directly when you do not need the panel:
 
@@ -119,7 +119,7 @@ Run CLI-equivalent slash subcommands directly when you do not need the panel:
 /mason-doctor
 ```
 
-Direct slash-command results are rendered as human-readable tables or summaries, not raw JSON.
+Direct non-long slash-command results are rendered as human-readable tables or summaries, not raw JSON. Direct long commands (`/mason install`, `/mason update`, `/mason uninstall`, `/mason refresh`) use the same progress panel when custom UI is available and fall back to the final rendered result otherwise.
 
 Use the following tools from Pi (they call the Rust CLI under the hood):
 
@@ -149,7 +149,7 @@ mason4agents doctor
 mason4agents register --omp
 ```
 
-By default, all commands output human-readable text. Add `--json` for structured JSON output wrapped in `{"ok": true, "data": ...}`.
+By default, all commands output human-readable text. Add `--json` for a final structured JSON envelope wrapped in `{"ok": true, "data": ...}`; for long operations, progress events are written to stderr as NDJSON objects with `kind: "progress"` while stdout remains the final envelope only. Download progress events include `total_bytes`, `downloaded_bytes`, `download_percent`, and `bytes_per_second` when the remote source reports a content length.
 Package-changing commands run through the Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` to register already-installed Mason LSP tools with Oh My Pi manually.
 
 Example text output:

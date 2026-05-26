@@ -10,9 +10,11 @@ work, current conversation decisions, code behavior, tests, and `docs/recap.md`.
   invalidation behavior in `src/pi/` adapters.
 - Do not leak host APIs, theme token names, or Pi-specific lifecycle assumptions
   into the neutral TUI core.
-- Direct slash-command output must not open blocking custom UI overlays. Use the
-  interactive overlay for empty `/mason`; publish inline rendered output for
-  direct subcommands such as `/mason doctor` or `/mason search ...`.
+- Direct non-long slash-command output must not open blocking custom UI overlays.
+  Use the interactive overlay for empty `/mason`, and publish inline rendered
+  output for direct subcommands such as `/mason doctor` or `/mason search ...`.
+  Direct long operations (`install`, `update`, `uninstall`, `refresh`) are the
+  explicit exception: open the progress overlay when custom UI exists.
 
 ## Rendering and Layout
 
@@ -39,6 +41,11 @@ work, current conversation decisions, code behavior, tests, and `docs/recap.md`.
   behind unused placeholders.
 - Initial panel work must not block the first visible render. Show the panel first,
   then start expensive cache/CLI work and invalidate when data returns.
+- Progress overlays must start CLI work after the first visible render, stream
+  progress events into the panel, and keep the final result in that panel.
+- A 30s no-progress timeout is a UI state only. `q`/`Esc` may hide the panel
+  after timeout, but must not kill the Rust CLI; keep the operation lock until
+  the CLI promise settles.
 - Fast tab switching must not allow stale CLI output to overwrite newer state.
   Guard async command updates with a monotonically increasing run id.
 - Local `/mason` handlers should hide Pi's working row while running and restore

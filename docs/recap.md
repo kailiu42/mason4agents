@@ -6,6 +6,11 @@
   was to detect `--json` from raw args before parsing and make `run` return an
   `Output { json, text }` struct, avoiding a broad `Clone` derivation across the
   clap command tree.
+- **CLI progress had to preserve the JSON stdout contract**: Existing tests and
+  Pi bridge parsing treat `--json` stdout as one final envelope. Progress for
+  long operations belongs on stderr as line-delimited events with human-readable
+  `message` fields, leaving stdout parseable as `success_json()` or
+  `error_json()`.
 - **Dependency-ordered commits had to start from an empty baseline**: The
   project had no baseline commit, so everything was untracked. `git add -N`
   gave diff visibility before staging, and the first layers temporarily reduced
@@ -37,9 +42,10 @@
   fail later at binary resolution; package metadata must match the native binary
   coverage actually shipped.
 - **Direct slash commands could hang on custom UI overlays**:
-  `/mason-doctor` and non-empty `/mason` subcommands opened `ui.custom()` panels
+  `/mason-doctor` and non-long `/mason` subcommands opened `ui.custom()` panels
   whose completion callback never fired for direct commands. Publishing inline
-  messages instead of opening a blocking overlay fixed those command paths.
+  messages fixed those paths; long package-changing or refresh commands are the
+  explicit exception and must use a progress overlay with a long-operation lock.
 - **OMP-loaded extensions could not resolve their packaged native binary**:
   OMP mirrors legacy extension files into `/tmp` before import, so
   `import.meta.url` pointed at the mirror instead of the real plugin directory.
@@ -112,6 +118,20 @@
   matched an OMP built-in server key. The fix was to resolve server identity by
   preferring the OMP built-in key first and only using registry aliases for
   non-built-in servers.
+- **Progress popups initially erased the backing list**: `runWithProgress()`
+  wrote result or loading models into `state.model` before the follow-up list
+  refresh completed, so the overlay replaced the list it was supposed to sit
+  on top of. The fix was to keep success/error output in `progress.finalModel`,
+  leave the current list model untouched while the popup is visible, and only
+  promote the final model into `state.model` when closing the popup if the base
+  view is still a placeholder.
+- **Stable progress popup sizing required a viewport, not full reflow**:
+  Locking width to half the terminal solved horizontal drift, but height still
+  changed as download events, timeout hints, and final result tables appeared.
+  The fix was to split popup content into head/middle/foot sections, lock the
+  body height on first render, and scroll the middle section instead of letting
+  total content length resize the overlay.
+
 
 # Valuable Findings
 
@@ -176,6 +196,11 @@
   sibling scripts from the instruction file directory instead of assuming a
   repo-root helper path.
 
+- **Progress panels need separate UI timeout and process lifetime state**:
+  A 30s no-progress warning is not a cancellation policy. The panel may be
+  hidden after timeout, but the CLI promise must keep running, continue holding
+  the operation lock, and re-show the final result when it settles.
+
 - **Filter UX needs one state model across views**: Main-list search and
   language/category picker filtering are easier to reason about when each view
   has an explicit draft state, a committed state, and a single function that
@@ -209,6 +234,16 @@
   server**: Seeing `typescript-language-server` load did not prove `vtsls` was
   supported. Comparing OMP source, generated `lsp.json`, and actual startup
   behavior revealed the exact built-in/custom split and the alias collision.
+- **Rendered line inspection beats reasoning about centered overlay math**:
+  Width assertions for the popup kept failing until the actual `renderLines()`
+  output was inspected directly. For centered overlays, the visible popup width
+  is the trimmed border line, not the full line length with left/right padding.
+- **Viewport scrolling keeps modal UX simpler than truncation heuristics**:
+  Once progress events and final result tables can exceed a fixed modal height,
+  preserving a fixed head and footer while scrolling only the middle section
+  keeps timeout hints visible, keeps sizing stable, and avoids unstable
+  first-N/last-M summaries.
+
 
 # Things To Avoid
 
@@ -262,6 +297,13 @@
 - **Do not start expensive work before the first custom UI render**: Even
   un-awaited async work can synchronously resolve binaries or spawn processes
   before the overlay appears.
+- **Do not put progress events on JSON stdout**: Machine clients parse stdout as
+  the final `{"ok": ...}` envelope. Stream structured progress on stderr and
+  keep stdout reserved for the terminal success/error envelope.
+- **Do not kill installs because a progress panel timed out**: Timeout means the
+  UI has seen no new progress event, not that the installer is unsafe to
+  interrupt. Let the Rust rollback/rename path finish and block new long
+  operations until the promise settles.
 - **Do not treat a missing repo-root script as proof that a checker is absent**:
   For shared symlinked instructions, resolve referenced scripts relative to the
   instruction file's directory.
@@ -286,3 +328,15 @@
   server**: For non-built-in servers, missing `fileTypes` or `rootMarkers` causes
   OMP to reject the entry during normalization even though the JSON file itself
   looks plausible.
+- **Do not write transient popup result state into the base list model while a
+  background refresh is still pending**: It clears the backdrop, reintroduces
+  `Loading...` flicker behind the overlay, and couples modal state to list
+  reload timing.
+- **Do not test centered popup dimensions from raw rendered line length**:
+  Centering whitespace makes the full line wider than the popup itself. Strip
+  ANSI and measure the trimmed border/title line when asserting overlay width
+  or fixed-height behavior.
+- **Do not fake fixed-height modals by hard truncating content without scroll
+  state**: Once progress output grows, users need a viewport they can move
+  through; otherwise older events, final result rows, or timeout hints disappear
+  unpredictably.
