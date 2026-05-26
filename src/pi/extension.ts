@@ -36,43 +36,48 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
       if (activeLongOperation === tracked) activeLongOperation = undefined;
     });
   };
-  registerCommand(ctx, "mason", "Open mason4agents package manager", async (args, commandCtx) => {
-    const restoreWorking = suppressLocalCommandWorking(commandCtx);
-    try {
-      const input = typeof args === "string" ? args.trim() : "";
-      const shownInUi = canShowCustomUi(commandCtx);
-      if (input.length === 0) {
-        const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncAfterPackageChange, onLongOperationStart: trackLongOperation });
-        if (!shownInUi) {
-          publishMessage(apiCtx, "mason4agents", panel.render());
-        }
-        return;
-      }
-
-      const initialCommand = directLongMasonCommand(input);
-      if (shownInUi && initialCommand) {
-        if (activeLongOperation) {
-          reportLongOperationBlocked(commandCtx, apiCtx);
+  registerCommand(ctx, "mason", {
+    description: "Open mason4agents package manager",
+    getArgumentCompletions: masonCommandArgumentCompletions,
+    async handler(args, commandCtx) {
+      const restoreWorking = suppressLocalCommandWorking(commandCtx);
+      try {
+        emptyMasonArgumentCompletionSuppressedAt = 0;
+        const input = typeof args === "string" ? args.trim() : "";
+        const shownInUi = canShowCustomUi(commandCtx);
+        if (input.length === 0) {
+          const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncAfterPackageChange, onLongOperationStart: trackLongOperation });
+          if (!shownInUi) {
+            publishMessage(apiCtx, "mason4agents", panel.render());
+          }
           return;
         }
-        await openMasonPanel(commandCtx, cliBridge, {
-          syncLspConfig: syncAfterPackageChange,
-          initialCommand,
-          onLongOperationStart: trackLongOperation,
-        });
-        return;
-      }
 
-      const model = await executeMasonCommand(input, cliBridge);
-      if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
-        syncAfterPackageChange();
+        const initialCommand = directLongMasonCommand(input);
+        if (shownInUi && initialCommand) {
+          if (activeLongOperation) {
+            reportLongOperationBlocked(commandCtx, apiCtx);
+            return;
+          }
+          await openMasonPanel(commandCtx, cliBridge, {
+            syncLspConfig: syncAfterPackageChange,
+            initialCommand,
+            onLongOperationStart: trackLongOperation,
+          });
+          return;
+        }
+
+        const model = await executeMasonCommand(input, cliBridge);
+        if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
+          syncAfterPackageChange();
+        }
+        publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
+      } catch (err) {
+        reportCommandError(commandCtx, apiCtx, "mason", err);
+      } finally {
+        restoreWorking();
       }
-      publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
-    } catch (err) {
-      reportCommandError(commandCtx, apiCtx, "mason", err);
-    } finally {
-      restoreWorking();
-    }
+    },
   });
 
   const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: syncMasonLspConfig });
@@ -86,11 +91,46 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
 
 export default activate;
 
+interface CommandAutocompleteItem {
+  label: string;
+  value: string;
+  description?: string;
+  hint?: string;
+}
+
+interface CommandRegistrationOptions {
+  description: string;
+  getArgumentCompletions?: (argumentPrefix: string) => CommandAutocompleteItem[] | null;
+  handler: (args: string, commandCtx: unknown) => unknown | Promise<unknown>;
+}
+
+interface MasonCommandSuggestion {
+  name: string;
+  description: string;
+  usage?: string;
+}
+
+const MASON_COMMAND_SUGGESTIONS: readonly MasonCommandSuggestion[] = [
+  { name: "refresh", description: "Refresh the Mason Registry cache", usage: "[--registry <source>]" },
+  { name: "search", description: "Search registry packages", usage: "[query] [--category <category>] [--language <language>] [--registry <source>]" },
+  { name: "list", description: "List registry packages", usage: "[--installed] [--outdated] [--registry <source>]" },
+  { name: "installed", description: "List installed packages" },
+  { name: "outdated", description: "List outdated packages", usage: "[--registry <source>]" },
+  { name: "install", description: "Install one or more packages", usage: "<pkg[@version]>... [--registry <source>] [--allow-build-scripts]" },
+  { name: "uninstall", description: "Uninstall one or more packages", usage: "<pkg>..." },
+  { name: "update", description: "Update packages", usage: "[pkg...] [--registry <source>] [--allow-build-scripts]" },
+  { name: "which", description: "Resolve an installed executable path", usage: "<executable>" },
+  { name: "bin-dir", description: "Print the Mason bin directory" },
+  { name: "env", description: "Print PATH setup for a shell", usage: "--shell bash|zsh|fish|powershell|cmd|json" },
+  { name: "doctor", description: "Run diagnostics" },
+  { name: "register", description: "Register installed Mason LSP tools with OMP", usage: "--omp" },
+];
+let emptyMasonArgumentCompletionSuppressedAt = 0;
+
 function registerCommand(
   ctx: unknown,
   name: string,
-  description: string,
-  handler: (args: string, commandCtx: unknown) => unknown | Promise<unknown>
+  options: CommandRegistrationOptions
 ): void {
   const anyCtx = ctx as {
     commands?: {
@@ -100,7 +140,6 @@ function registerCommand(
     command?: { register?: (name: string, options: unknown) => unknown };
     registerCommand?: (name: string, options: unknown) => unknown;
   };
-  const options = { description, handler };
   if (typeof anyCtx.registerCommand === "function") {
     anyCtx.registerCommand(name, options);
   } else if (typeof anyCtx.commands?.registerCommand === "function") {
@@ -110,6 +149,57 @@ function registerCommand(
   } else if (typeof anyCtx.command?.register === "function") {
     anyCtx.command.register(name, options);
   }
+}
+
+function masonCommandArgumentCompletions(argumentPrefix: string): CommandAutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart();
+  if (prefix.length === 0) return emptyMasonArgumentCompletions();
+  const spaceIndex = prefix.indexOf(" ");
+  if (spaceIndex < 0) return commandSuggestionItems(prefix.toLowerCase());
+
+  const command = prefix.slice(0, spaceIndex).toLowerCase();
+  const suggestion = MASON_COMMAND_SUGGESTIONS.find((item) => item.name === command);
+  if (!suggestion) return commandSuggestionItems(command);
+  if (!suggestion.usage) return null;
+
+  return [{
+    label: suggestion.name,
+    value: prefix,
+    description: suggestion.description,
+    hint: suggestion.usage,
+  }];
+}
+
+function emptyMasonArgumentCompletions(): CommandAutocompleteItem[] | null {
+  const now = Date.now();
+  if (emptyMasonArgumentCompletionSuppressedAt !== 0 && now - emptyMasonArgumentCompletionSuppressedAt < 10_000) {
+    emptyMasonArgumentCompletionSuppressedAt = 0;
+    return commandSuggestionItems("");
+  }
+  emptyMasonArgumentCompletionSuppressedAt = now;
+  return null;
+}
+
+function commandSuggestionItems(prefix: string): CommandAutocompleteItem[] | null {
+  const items: CommandAutocompleteItem[] = [];
+  for (const suggestion of MASON_COMMAND_SUGGESTIONS) {
+    if (prefix.length > 0 && !suggestion.name.startsWith(prefix)) continue;
+    if (suggestion.usage) {
+      items.push({
+        label: suggestion.name,
+        value: `${suggestion.name} `,
+        description: suggestion.description,
+        hint: suggestion.usage,
+      });
+      continue;
+    }
+    items.push({
+      label: suggestion.name,
+      value: `${suggestion.name} `,
+      description: suggestion.description,
+    });
+  }
+  return items.length > 0 ? items : null;
 }
 
 function canShowCustomUi(ctx: unknown): boolean {

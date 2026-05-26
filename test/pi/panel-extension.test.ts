@@ -359,12 +359,14 @@ describe("Pi extension", () => {
     const tools: string[] = [];
     const events: string[] = [];
     const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
+    const completions: Record<string, ((argumentPrefix: string) => Array<{ label: string; value: string; description?: string; hint?: string }> | null) | undefined> = {};
     const messages: unknown[] = [];
     const ctx = {
       commands: {
-        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown }) {
+        registerCommand(name: string, options: { handler: (args: string, commandCtx: unknown) => Promise<unknown> | unknown; getArgumentCompletions?: (argumentPrefix: string) => Array<{ label: string; value: string; description?: string; hint?: string }> | null }) {
           commands.push(name);
           handlers[name] = options.handler;
+          completions[name] = options.getArgumentCompletions;
         },
       },
       tools: { registerTool(definition: { name: string }) { tools.push(definition.name); } },
@@ -380,6 +382,24 @@ describe("Pi extension", () => {
       expect(tools).toContain("mason_install");
       expect(events).toEqual(["session_start"]);
       expect((process.env.PATH ?? "").startsWith(result.binDir)).toBe(true);
+      expect(completions.mason?.("")).toBeNull();
+      expect(completions.mason?.("")).toContainEqual(expect.objectContaining({
+        label: "refresh",
+        value: "refresh ",
+        hint: "[--registry <source>]",
+      }));
+      expect(completions.mason?.("inst")).toContainEqual(expect.objectContaining({
+        label: "install",
+        value: "install ",
+        hint: "<pkg[@version]>... [--registry <source>] [--allow-build-scripts]",
+      }));
+      expect(completions.mason?.("install stylua")).toEqual([
+        expect.objectContaining({
+          label: "install",
+          value: "install stylua",
+          hint: "<pkg[@version]>... [--registry <source>] [--allow-build-scripts]",
+        }),
+      ]);
       const workingVisible: boolean[] = [];
       const commandCtx = {
         hasUI: false,
