@@ -82,6 +82,23 @@
   corrected rule resolves `scripts/check-commit-message.sh` relative to
   `.coding-agent-instructions/git/git-commit-rules.md`.
 
+- **`/mason` filter state spans input, picker, and list views**: Name,
+  language, and category filters originally behaved differently: slash input
+  committed only on Enter, picker filters could close the input without applying
+  the choice, and active constraints were easy to miss. The fix was to separate
+  draft filters from committed filters, apply live filtering only after three
+  characters, make picker Enter select the highlighted filtered candidate, and
+  keep all active filters visible as highlighted tab-row badges.
+- **Inline filter badges can disappear if appended like width-limited tabs**:
+  Reusing the width-aware tab-part appender for `[/]` meant narrow layouts could
+  consume all width before the active filter marker was added. Appending filter
+  badges unconditionally and letting the final row fitting truncate the whole
+  line preserves the higher-priority status signal.
+- **A requested UI document was claimed before it existed**: The UI guideline
+  write-up had to be verified with a file lookup, not assumed from prose. The
+  recovery was to check for `docs/UI.md`, write the missing file, and commit it
+  separately after validating the worktree state.
+
 # Valuable Findings
 
 - **Layered commits enable targeted validation**: Splitting work into core
@@ -145,6 +162,23 @@
   sibling scripts from the instruction file directory instead of assuming a
   repo-root helper path.
 
+- **Filter UX needs one state model across views**: Main-list search and
+  language/category picker filtering are easier to reason about when each view
+  has an explicit draft state, a committed state, and a single function that
+  derives the active visible rows or candidates.
+- **Status visibility is part of the behavior contract**: A filter that works
+  but is not visible after the popup closes is still a UI bug. Tests should
+  assert not only filtered rows, but also durable status badges such as
+  `[/ query]`, `[l Language]`, and `[c Category]`.
+- **TypeScript optional-property exactness catches UI-state ambiguity**:
+  `exactOptionalPropertyTypes` rejected assigning `undefined` to optional picker
+  filter drafts, forcing the code to use `delete` when leaving filter mode. That
+  made "filter draft absent" distinct from "filter draft is an empty string".
+- **Concrete package names in tests can imply false special-casing**: Using real
+  Mason package names and languages helped test recognizable behavior, but also
+  made dynamic registry-driven logic look hard-coded. Neutral fixtures better
+  communicate that production code derives options from package data.
+
 # Things To Avoid
 
 - **Do not derive broad traits to work around ownership**: Deriving `Clone` on
@@ -200,3 +234,16 @@
 - **Do not treat a missing repo-root script as proof that a checker is absent**:
   For shared symlinked instructions, resolve referenced scripts relative to the
   instruction file's directory.
+- **Do not hide active filters only in table titles or transient popups**:
+  Once a name/language/category filter is applied, keep it visible in the main
+  tab row so users can understand why the list is constrained.
+- **Do not make Enter semantics differ between filtered picker and unfiltered
+  picker modes**: In both cases Enter should apply the highlighted candidate and
+  return to the list, not merely dismiss the filter input.
+- **Do not let layout helpers silently drop high-priority status text**:
+  Width-aware appenders are useful for tab labels, but active filter badges must
+  be added before final fitting so narrow screens truncate predictably instead
+  of losing the filter indicator entirely.
+- **Do not claim a documentation deliverable was written without checking the
+  filesystem**: For docs tasks, verify the target file exists and inspect status
+  before reporting completion or committing.
