@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { masonBinDir } from "./path-env";
+import { masonBinDir, masonCacheDir, masonStateDir } from "./path-env";
+import { ompBuiltInServerNames } from "./omp-lsp-defaults";
 
 const CONFIG_FILE = "lsp.json";
 
@@ -65,18 +66,28 @@ export interface MasonLspConfigSyncResult {
   servers: string[];
   changed: boolean;
   skipped?: string;
+  lspPackages?: string[];
 }
+
+type OmpLspServerConfig = {
+  command: string;
+  args?: string[];
+  fileTypes?: string[];
+  rootMarkers?: string[];
+  initOptions?: Record<string, unknown>;
+};
 
 export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonLspConfigSyncResult {
   const configPath = join(ompAgentDir(env), CONFIG_FILE);
   const binDir = masonBinDir(env);
-  const overrides = masonLspOverrides(binDir);
-  const servers = Object.keys(overrides);
+  const overrides = masonLspOverrides(env, binDir);
+  const servers = Object.keys(overrides.configs);
+  const lspPackages = Object.keys(overrides.packages);
   const existing = readJsonObject(configPath);
   if (existing === null) {
-    return { configPath, servers, changed: false, skipped: "invalid_json" };
+    return { configPath, servers, lspPackages, changed: false, skipped: "invalid_json" };
   }
-  if (servers.length === 0 && existing === undefined) return { configPath, servers, changed: false };
+  if (servers.length === 0 && existing === undefined) return { configPath, servers, lspPackages, changed: false };
 
   const root = existing ?? {};
   const rawServers = isRecord(root.servers) ? root.servers : {};
@@ -85,7 +96,7 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
   let changed = !isRecord(root.servers);
 
   for (const server of previous.servers) {
-    if (server in overrides) continue;
+    if (server in overrides.configs) continue;
     const current = nextServers[server];
     if (isRecord(current) && isGeneratedCommand(current.command, previous.binDir ?? binDir, binDir)) {
       delete nextServers[server];
@@ -93,15 +104,16 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
     }
   }
 
-  for (const [server, command] of Object.entries(overrides)) {
+  for (const [server, config] of Object.entries(overrides.configs)) {
     const current = nextServers[server];
     if (!isRecord(current)) {
-      nextServers[server] = { command };
+      nextServers[server] = config;
       changed = true;
       continue;
     }
-    if (shouldUpdateCommand(current.command, command, binDir)) {
-      nextServers[server] = { ...current, command };
+    const next = { ...current, ...config };
+    if (shouldUpdateServerConfig(current, next, binDir)) {
+      nextServers[server] = next;
       changed = true;
     }
   }
@@ -112,27 +124,158 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
       generated: true,
       binDir,
       servers,
+      lspPackages,
     },
     servers: nextServers,
   };
 
   if (!changed && JSON.stringify(root.mason4agents) === JSON.stringify(nextRoot.mason4agents)) {
-    return { configPath, servers, changed: false };
+    return { configPath, servers, lspPackages, changed: false };
   }
 
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(nextRoot, null, 2)}\n`);
-  return { configPath, servers, changed: true };
+  return { configPath, servers, lspPackages, changed: true };
 }
 
-function masonLspOverrides(binDir: string): Record<string, string> {
-  const overrides: Record<string, string> = {};
+function masonLspOverrides(env: NodeJS.ProcessEnv, binDir: string): { configs: Record<string, OmpLspServerConfig>; packages: Record<string, string> } {
+  const configs = staticMasonLspOverrides(binDir);
+  const packages: Record<string, string> = {};
+  const builtInServers = ompBuiltInServerNames(env);
+  if (builtInServers.size === 0) {
+    for (const [server] of MASON_LSP_COMMANDS) builtInServers.add(server);
+  }
+  for (const entry of dynamicMasonLspOverrides(env, binDir, builtInServers)) {
+    configs[entry.server] = entry.config;
+    packages[entry.package] = entry.server;
+  }
+  return { configs, packages };
+}
+
+function staticMasonLspOverrides(binDir: string): Record<string, OmpLspServerConfig> {
+  const overrides: Record<string, OmpLspServerConfig> = {};
   for (const [server, command] of MASON_LSP_COMMANDS) {
     const executable = resolveBinExecutable(binDir, command);
-    if (executable) overrides[server] = executable;
+    if (executable) overrides[server] = { command: executable };
   }
   return overrides;
 }
+
+function dynamicMasonLspOverrides(
+  env: NodeJS.ProcessEnv,
+  binDir: string,
+  builtInServers: Set<string>,
+): Array<{ package: string; server: string; config: OmpLspServerConfig }> {
+  const installed = readInstalledPackages(env);
+  const registry = readRegistryPackages(env);
+  const result: Array<{ package: string; server: string; config: OmpLspServerConfig }> = [];
+  for (const [name, installedPackage] of Object.entries(installed)) {
+    const packageName = stringValue(installedPackage.name) || name;
+    const spec = registry[packageName];
+    if (!spec || !isLspPackage(spec)) continue;
+    const server = preferredLspServerName(packageName, spec, builtInServers);
+    const executable = resolveBinExecutable(binDir, preferredBinName(installedPackage, packageName, server));
+    if (!executable) continue;
+    const config = builtInServers.has(server)
+      ? { command: executable }
+      : lspServerConfig(packageName, spec, executable);
+    if (!config) continue;
+    result.push({ package: packageName, server, config });
+  }
+  result.sort((left, right) => left.server.localeCompare(right.server));
+  return result;
+}
+
+function readInstalledPackages(env: NodeJS.ProcessEnv): Record<string, Record<string, unknown>> {
+  const root = readJsonObject(join(masonStateDir(env), "installed.json"));
+  const packages = root?.packages;
+  if (!isRecord(packages)) return {};
+  return recordEntries(packages);
+}
+
+function readRegistryPackages(env: NodeJS.ProcessEnv): Record<string, Record<string, unknown>> {
+  const root = readJsonObject(join(masonCacheDir(env), "registry", "index.json"));
+  const packages = root?.packages;
+  if (!isRecord(packages)) return {};
+  return recordEntries(packages);
+}
+
+function recordEntries(value: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const result: Record<string, Record<string, unknown>> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (isRecord(child)) result[key] = child;
+  }
+  return result;
+}
+
+function isLspPackage(spec: Record<string, unknown>): boolean {
+  if (stringValue(recordValue(spec.neovim)?.lspconfig).length > 0) return true;
+  return stringValues(spec.categories).some((category) => category.toLocaleLowerCase() === "lsp");
+}
+
+function preferredLspServerName(
+  packageName: string,
+  spec: Record<string, unknown>,
+  builtInServers: Set<string>,
+): string {
+  const lspconfig = stringValue(recordValue(spec.neovim)?.lspconfig);
+  if (builtInServers.has(packageName)) return packageName;
+  if (lspconfig.length > 0 && builtInServers.has(lspconfig)) return lspconfig;
+  return lspconfig || packageName;
+}
+
+function preferredBinName(installedPackage: Record<string, unknown>, packageName: string, server: string): string {
+  const bins = Object.keys(recordValue(installedPackage.bins) ?? {}).sort((left, right) => left.localeCompare(right));
+  return bins.find((bin) => bin === packageName)
+    ?? bins.find((bin) => bin === server)
+    ?? bins.find((bin) => bin.includes("language-server"))
+    ?? bins[0]
+    ?? packageName;
+}
+
+function lspServerConfig(packageName: string, spec: Record<string, unknown>, command: string): OmpLspServerConfig | undefined {
+  const template = lspConfigTemplate(packageName, spec);
+  if (!template) return undefined;
+  return { command, ...template };
+}
+
+function lspConfigTemplate(packageName: string, spec: Record<string, unknown>): Omit<OmpLspServerConfig, "command"> | undefined {
+  if (packageName === "vtsls") {
+    return {
+      args: ["--stdio"],
+      fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+      rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
+      initOptions: { hostInfo: "omp-coding-agent" },
+    };
+  }
+
+  return lspDefaultsForLanguages(stringValues(spec.languages));
+}
+
+function lspDefaultsForLanguages(languages: readonly string[]): Omit<OmpLspServerConfig, "command"> | undefined {
+  const normalized = new Set(languages.map((language) => language.toLocaleLowerCase()));
+  if (normalized.has("typescript") || normalized.has("javascript")) {
+    return {
+      args: ["--stdio"],
+      fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+      rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
+    };
+  }
+  if (normalized.has("rust")) return { fileTypes: [".rs"], rootMarkers: ["Cargo.toml", "rust-analyzer.toml"] };
+  if (normalized.has("go")) return { fileTypes: [".go", ".mod", ".sum"], rootMarkers: ["go.mod", "go.work", "go.sum"] };
+  if (normalized.has("python")) return { fileTypes: [".py", ".pyi"], rootMarkers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"] };
+  if (normalized.has("lua")) return { fileTypes: [".lua"], rootMarkers: [".luarc.json", ".luarc.jsonc", "stylua.toml", ".git"] };
+  if (normalized.has("shell") || normalized.has("bash")) return { fileTypes: [".sh", ".bash", ".zsh"], rootMarkers: [".git"] };
+  if (normalized.has("java")) return { fileTypes: [".java"], rootMarkers: ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", ".project"] };
+  if (normalized.has("ruby")) return { fileTypes: [".rb", ".rake", ".gemspec"], rootMarkers: ["Gemfile", ".ruby-version", ".ruby-gemset"] };
+  if (normalized.has("php")) return { fileTypes: [".php"], rootMarkers: ["composer.json", ".git"] };
+  if (normalized.has("docker")) return { fileTypes: ["Dockerfile"], rootMarkers: [".git"] };
+  if (normalized.has("terraform")) return { fileTypes: [".tf", ".tfvars"], rootMarkers: [".git"] };
+  if (normalized.has("yaml")) return { fileTypes: [".yaml", ".yml"], rootMarkers: [".git"] };
+  if (normalized.has("markdown")) return { fileTypes: [".md", ".mdx"], rootMarkers: [".git"] };
+  return undefined;
+}
+
 
 function resolveBinExecutable(binDir: string, command: string): string | undefined {
   const direct = join(binDir, command);
@@ -153,6 +296,11 @@ function isFileLike(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function shouldUpdateServerConfig(current: Record<string, unknown>, next: Record<string, unknown>, binDir: string): boolean {
+  if (shouldUpdateCommand(current.command, stringValue(next.command), binDir)) return true;
+  return JSON.stringify(current) !== JSON.stringify(next);
 }
 
 function shouldUpdateCommand(current: unknown, next: string, binDir: string): boolean {
@@ -209,4 +357,25 @@ function pathUrl(path: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function stringValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function stringValues(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  for (const item of value) {
+    const text = stringValue(item);
+    if (text.length > 0) result.push(text);
+  }
+  return result;
 }

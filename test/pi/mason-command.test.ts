@@ -30,6 +30,7 @@ describe("Mason command parser", () => {
     expect(parseMasonCommandInput("installed")).toMatchObject({ argv: ["list", "--installed"], resultKind: "installed" });
     expect(parseMasonCommandInput("outdated --registry=file:///tmp/reg")).toMatchObject({ argv: ["list", "--outdated", "--registry", "file:///tmp/reg"] });
     expect(parseMasonCommandInput("env --shell bash")).toMatchObject({ argv: ["env", "--shell", "bash"], resultKind: "env" });
+    expect(parseMasonCommandInput("register --omp")).toMatchObject({ kind: "register", argv: ["--omp"], title: "mason register --omp" });
   });
 
   test("reports invalid input as human-readable display", async () => {

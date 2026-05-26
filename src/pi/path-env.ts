@@ -41,6 +41,31 @@ export function masonBinDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(masonDataDir(env), "bin");
 }
 
+export function masonCacheDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(masonBaseDir(env, "MASON4AGENTS_CACHE_HOME", "XDG_CACHE_HOME", ".cache"), "mason4agents");
+}
+
+export function masonStateDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(masonBaseDir(env, "MASON4AGENTS_STATE_HOME", "XDG_STATE_HOME", ".local/state"), "mason4agents");
+}
+
+function masonBaseDir(env: NodeJS.ProcessEnv, explicitKey: string, xdgKey: string, fallback: string): string {
+  const explicit = absoluteEnvPath(env[explicitKey]);
+  if (explicit) return explicit;
+  const xdg = absoluteEnvPath(env[xdgKey] ?? env.LOCALAPPDATA);
+  if (xdg) return xdg;
+  const home = env.HOME ?? env.USERPROFILE;
+  if (!home) {
+    throw new Error("HOME or USERPROFILE is required to resolve mason4agents directories");
+  }
+  return join(home, fallback);
+}
+
+function absoluteEnvPath(path: string | undefined): string | undefined {
+  if (!path || path.startsWith(".")) return undefined;
+  return path.startsWith("/") || /^[A-Za-z]:[/\\]/.test(path) ? path : undefined;
+}
+
 export function ensureMasonBinOnPath(env: NodeJS.ProcessEnv = process.env): PathInjectionResult {
   const dataDir = masonDataDir(env);
   const binDir = join(dataDir, "bin");

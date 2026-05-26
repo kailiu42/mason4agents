@@ -1,6 +1,7 @@
 import type { CliBridge, CliRunOptions } from "./cli";
 import { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
 import { errorDisplay, modelForResult, usageDisplay, type DisplayModel, type MasonResultKind } from "./mason-render";
+import { registerInstalledTools, renderRegisterResult } from "./register";
 
 export { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
 
@@ -16,7 +17,8 @@ export type MasonCommandName =
   | "which"
   | "bin-dir"
   | "env"
-  | "doctor";
+  | "doctor"
+  | "register";
 
 export interface ParsedMasonCommand {
   kind: "command";
@@ -30,7 +32,13 @@ export interface ParsedMasonUsage {
   kind: "usage";
 }
 
-export type ParsedMasonInput = ParsedMasonCommand | ParsedMasonUsage;
+export interface ParsedMasonRegister {
+  kind: "register";
+  argv: string[];
+  title: string;
+}
+
+export type ParsedMasonInput = ParsedMasonCommand | ParsedMasonRegister | ParsedMasonUsage;
 
 const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 
@@ -42,6 +50,14 @@ export async function executeMasonCommand(input: string, bridge: CliBridge, opti
     return errorDisplay("mason4agents", messageFromError(err), usageDisplay().lines);
   }
   if (parsed.kind === "usage") return usageDisplay();
+  if (parsed.kind === "register") {
+    try {
+      const result = registerInstalledTools(parsed.argv);
+      return { kind: "summary", title: parsed.title, lines: renderRegisterResult(result).split("\n") };
+    } catch (err) {
+      return errorDisplay(parsed.title, messageFromError(err), usageDisplay().lines);
+    }
+  }
   try {
     const data = await bridge.run(parsed.argv, options);
     return modelForResult(parsed.resultKind, data, parsed.title);
@@ -86,6 +102,8 @@ export function parseMasonCommandTokens(tokens: readonly string[]): ParsedMasonI
       return parseEnv(rest);
     case "doctor":
       return parseNoArgCommand("doctor", rest, ["doctor"], "doctor", "mason doctor");
+    case "register":
+      return parseRegister(rest);
     default:
       throw new MasonCommandInputError(`Unknown /mason subcommand: ${command}`);
   }
@@ -231,6 +249,15 @@ function parseWhich(tokens: readonly string[]): ParsedMasonCommand {
   const positionals = parsePlainPositionals("which", tokens);
   if (positionals.length !== 1) throw new MasonCommandInputError("which requires exactly one executable.");
   return command("which", ["which", positionals[0]!], "which", `mason which ${positionals[0]!}`);
+}
+
+function parseRegister(tokens: readonly string[]): ParsedMasonRegister {
+  if (tokens.length === 0) throw new MasonCommandInputError("register requires at least one target: --omp");
+  for (const token of tokens) {
+    if (isHelp(token)) return { kind: "register", argv: ["--help"], title: "mason register" };
+    if (token !== "--omp") throw new MasonCommandInputError(`register does not accept argument: ${token}`);
+  }
+  return { kind: "register", argv: [...tokens], title: "mason register --omp" };
 }
 
 function parseEnv(tokens: readonly string[]): ParsedMasonCommand {

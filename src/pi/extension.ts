@@ -6,6 +6,7 @@ import { modelSupportsFiltering, renderDisplay, renderDisplayText, type DisplayM
 import { registerPiTools } from "./pi-tools";
 import { ensureMasonBinOnPath } from "./path-env";
 import { syncMasonLspConfig } from "./lsp-config";
+import { syncOmpLspDefaultsCache } from "./omp-lsp-defaults";
 import { pathToFileURL } from "node:url";
 
 export interface PiActivationResult {
@@ -16,6 +17,7 @@ export interface PiActivationResult {
 
 export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActivationResult> {
   const pathInfo = ensureMasonBinOnPath();
+  syncOmpLspDefaultsCache();
   syncMasonLspConfig();
   const apiCtx = ctx;
   const cliBridge = bridge ?? createCliBridge(undefined, extensionStartUrl(ctx));
@@ -34,6 +36,7 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
 
       const model = await executeMasonCommand(input, cliBridge);
       if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
+        syncOmpLspDefaultsCache();
         syncMasonLspConfig();
       }
       publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
@@ -59,6 +62,7 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
   const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: syncMasonLspConfig });
   registerSessionStart(ctx, () => {
     ensureMasonBinOnPath();
+    syncOmpLspDefaultsCache();
     syncMasonLspConfig();
   });
   return { name: "mason4agents", binDir: pathInfo.binDir, tools };
