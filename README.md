@@ -4,14 +4,20 @@
 
 **Mason Registry powered tool installer for coding agents.**
 
-mason4agents downloads and manages LSP servers, formatters, linters, and other development tools from the [Mason Registry](https://github.com/mason-org/mason-registry) — the same registry used by mason.nvim. It installs tools to XDG-compliant directories and makes them available via PATH to coding agents such as [Oh My Pi](https://ohmyPi.com).
+mason4agents downloads and manages LSP servers, formatters, linters, and other development tools from the [Mason Registry](https://github.com/mason-org/mason-registry) — the same registry used by mason.nvim. It installs tools into the user's home directory and makes them available via PATH to coding agents such as [oh-my-pi](https://github.com/can1357/oh-my-pi).
 
-v1 supports **Pi CLI** (v0.75.5+). Future versions may add Claude Code, Codex CLI, Copilot, OpenCode, and MCP adapters.
+It currently supports **oh-my-pi**. Future versions may support Claude Code, Codex CLI, Copilot, OpenCode, and others.
+
+## Why
+
+Installing tools such as LSP servers, linters, and formatters is inconvenient. Many of them are not included in native OS package managers, so users have to download and install them manually. This introduces maintenance burden.
+
+Another problem is you may not know what tools are available for your project. This tool includes a (primitive) suggestion function. It scans your project, prefers oh-my-pi's built-in LSP defaults, and falls back to information from [LazyVim](https://github.com/LazyVim/LazyVim) to suggest relevant tools.
 
 ## Features
 
 - **Mason Registry compatible** — consumes the same registry, package schema, and release assets as mason.nvim
-- **Pi extension** — `/mason` interactive package manager, CLI-equivalent slash subcommands, 7 LLM-callable tools, automatic PATH injection
+- **OMP/Pi extension** — `/mason` interactive package manager, CLI-backed slash subcommands, 7 LLM-callable tools, automatic PATH injection
 - **XDG Base Directory** — data, config, cache, and state follow `$XDG_*` conventions
 - **Safe by default** — no build script execution without `--allow-build-scripts`, zip-slip protection, path traversal rejection, sandboxed temp directories with atomic rename
 - **JSON protocol** — all CLI commands support `--json` final envelopes; long operations stream stderr NDJSON progress with byte totals, percent complete, and current speed when available
@@ -21,8 +27,8 @@ v1 supports **Pi CLI** (v0.75.5+). Future versions may add Claude Code, Codex CL
 ## Prerequisites
 
 - **Rust toolchain** (stable, edition 2021) — for building from source
-- **Bun** (v1.x) — for TypeScript Pi adapter
-- **Pi CLI** (v0.75.5+) — for Pi extension integration
+- **Bun** (v1.x) — for the TypeScript OMP/Pi adapter
+- **oh-my-pi (OMP) or Pi CLI** — for extension integration
 - **External package managers** (optional, per source type):
   - `npm` — for npm-based packages
   - `python3` + `pip` — for PyPI packages
@@ -46,19 +52,24 @@ cargo build --release
 # binary at target/release/mason4agents
 ```
 
-### Via npm / Pi (when published)
+### Via npm package in oh-my-pi (OMP) / Pi
 
 ```bash
-# Install the package (locally or from npm)
+# Install with oh-my-pi (OMP)
+omp plugin install mason4agents
+
+# Or install with Pi
 pi install npm:mason4agents
 
-# Or test locally without publishing
+# Test locally with OMP without publishing
+omp --extension ./dist/pi/extension.js
+# or
 pi --offline -e dist/pi/extension.js
 ```
 
 ### Binary resolution order
 
-The npm shim and Pi extension locate the Rust binary by checking (in order):
+The npm shim and OMP/Pi extension locate the Rust binary by checking (in order):
 
 1. `MASON4AGENTS_BIN` environment variable
 2. Bundled `native/mason4agents-{platform}-{arch}` (built by `bun run build`)
@@ -98,7 +109,7 @@ mason4agents uninstall stylua
 
 ### Pi Extension
 
-Open the interactive package manager in Pi:
+Open the interactive package manager in OMP/Pi:
 
 ```
 /mason
@@ -106,7 +117,7 @@ Open the interactive package manager in Pi:
 
 The panel opens as a host-width, theme-aware TUI with visible tabs at the top (`list`, `suggested`, `installed`, `check update`, `refresh`, `doctor`) and a width-aware table area below. The `suggested` tab scans the local project, prefers OMP built-in LSP defaults as its LSP recommendation source, and falls back to locally cached LazyVim curated suggestions for languages OMP does not cover. Table views show installed status directly, keep a highlighted current row, and support `Tab`/`←`/`→` to switch tabs, `/` local filtering, `↑`/`↓` row selection, `Enter` for an in-place package detail popup, and state-aware package actions: `i` for missing packages, `u`/`d` for installed packages. Long operations (`install`, `update`, `uninstall`, `refresh`) show a modal progress panel, block additional Mason operations while the CLI runs, enter a 30s no-progress warning state where `q`/`Esc` closes the panel without killing the CLI, and keep the final result in that panel.
 
-Run CLI-equivalent slash subcommands directly when you do not need the panel. `/mason` with no arguments opens the TUI; pressing `Tab` after the bare `/mason ` prompt shows all subcommands, and typing a prefix narrows the subcommand suggestions with per-command argument shapes before you press Enter:
+Run CLI-backed slash subcommands directly when you do not need the panel. `/mason` with no arguments opens the TUI; pressing `Tab` after the bare `/mason ` prompt shows all subcommands, and typing a prefix narrows the subcommand suggestions with per-command argument shapes before you press Enter:
 
 ```text
 /mason search stylua --language Lua
@@ -120,7 +131,7 @@ Run CLI-equivalent slash subcommands directly when you do not need the panel. `/
 
 Direct non-long slash-command results are rendered as human-readable tables or summaries, not raw JSON. Direct long commands (`/mason install`, `/mason update`, `/mason uninstall`, `/mason refresh`) use the same progress panel when custom UI is available and fall back to the final rendered result otherwise.
 
-Use the following tools from Pi (they call the Rust CLI under the hood):
+Use the following tools from OMP/Pi (they call the Rust CLI under the hood):
 
 | Tool | Description |
 |---|---|
@@ -136,8 +147,8 @@ Use the following tools from Pi (they call the Rust CLI under the hood):
 
 ```text
 mason4agents refresh [--registry <url|file>]
-mason4agents search [query] [--category LSP|Formatter|Linter] [--language <lang>]
-mason4agents list [--installed|--outdated]
+mason4agents search [query] [--category <category>] [--language <lang>] [--registry <url|file>]
+mason4agents list [--installed|--outdated] [--registry <url|file>]
 mason4agents install <pkg[@version]>... [--registry <url|file>] [--allow-build-scripts]
 mason4agents uninstall <pkg>...
 mason4agents update [pkg...] [--registry <url|file>] [--allow-build-scripts]
@@ -149,7 +160,7 @@ mason4agents register --omp
 ```
 
 By default, all commands output human-readable text. Add `--json` for a final structured JSON envelope wrapped in `{"ok": true, "data": ...}`; for long operations, progress events are written to stderr as NDJSON objects with `kind: "progress"` while stdout remains the final envelope only. Download progress events include `total_bytes`, `downloaded_bytes`, `download_percent`, and `bytes_per_second` when the remote source reports a content length.
-Package-changing commands run through the Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` to register already-installed Mason LSP tools with Oh My Pi manually.
+Package-changing commands run through the OMP/Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` to register already-installed Mason LSP tools with oh-my-pi manually.
 
 Example text output:
 
@@ -178,9 +189,9 @@ $ mason4agents env --shell bash
 export PATH='/home/user/.local/share/mason4agents/bin':"$PATH"
 ```
 
-## Building the Plugin
+## Building
 
-The plugin has two components: the **Rust CLI** (core) and the **Pi extension** (TypeScript).
+The package has three delivered pieces: the **Rust CLI** (core), the **npm shim**, and the **OMP/Pi extension** (TypeScript).
 
 ### Build everything (recommended)
 
@@ -190,7 +201,7 @@ bun run build
 
 This runs:
 1. `bun build` to bundle the TypeScript npm shim (`dist/bin/mason4agents.js`)
-2. `bun build` to bundle the Pi extension (`dist/pi/extension.js`)
+2. `bun build` to bundle the OMP/Pi extension (`dist/pi/extension.js`)
 3. `cargo build --release` to compile the Rust CLI
 4. Copies the release binary to `native/mason4agents-{platform}-{arch}`
 
@@ -201,7 +212,7 @@ This runs:
 cargo build --release                          # binary: target/release/mason4agents
 cargo build                                    # debug binary: target/debug/mason4agents
 
-# Pi extension only (TypeScript bundle)
+# OMP/Pi extension only (TypeScript bundle)
 ./node_modules/.bin/tsc --noEmit               # typecheck
 bun build src/pi/extension.ts --outdir dist/pi --target bun
 ```
@@ -211,10 +222,10 @@ bun build src/pi/extension.ts --outdir dist/pi --target bun
 | Artifact | Path | Used by |
 |---|---|---|
 | Rust CLI | `target/release/mason4agents` | Direct shell usage |
-| Rust CLI (dev) | `target/debug/mason4agents` | Pi extension dev fallback |
-| Native binary | `native/mason4agents-{platform}-{arch}` | Bundled Pi extension lookup |
+| Rust CLI (dev) | `target/debug/mason4agents` | OMP/Pi extension dev fallback |
+| Native binary | `native/mason4agents-{platform}-{arch}` | Bundled OMP/Pi extension lookup |
 | npm shim | `dist/bin/mason4agents.js` | `npx mason4agents` |
-| Pi extension | `dist/pi/extension.js` | `pi --offline -e dist/pi/extension.js` |
+| OMP/Pi extension | `dist/pi/extension.js` | `omp --extension ./dist/pi/extension.js` / `pi --offline -e dist/pi/extension.js` |
 
 ### Package and publish the current platform
 
@@ -236,7 +247,7 @@ These commands package the current platform binary as `native/mason4agents-{plat
 ### Rust
 
 ```bash
-cargo test                         # 42 tests (40 unit + 2 integration)
+cargo test                         # Rust test suite
 cargo test cli_fixture             # CLI integration tests only
 cargo test -- --ignored            # including network smoke test
 ```
@@ -244,7 +255,7 @@ cargo test -- --ignored            # including network smoke test
 ### TypeScript
 
 ```bash
-bun test                           # 19 tests
+bun test                           # TypeScript test suite
 ```
 
 ### Full verification
@@ -262,29 +273,28 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && 
   packages/<name>/...                # Installed package contents
   share/                             # Mason share links
   opt/                               # Mason opt links
-  state/installed.json               # Install state database
 ~/.cache/mason4agents/
   registry/                          # Cached registry index + checksum
   downloads/                         # Downloaded archives (cacheable)
   logs/                              # Install logs
 ~/.local/state/mason4agents/
+  installed.json                     # Install state database
   locks/                             # Install/update lock files
 ```
 
 Override any directory via `MASON4AGENTS_CONFIG_HOME`, `MASON4AGENTS_DATA_HOME`, `MASON4AGENTS_CACHE_HOME`, `MASON4AGENTS_STATE_HOME`.
 
-## Unsupported Source Types in v1
+## Source Types Requiring External Managers
 
-The following Mason source types are recognized but require external package managers (`mason4agents doctor` will report them):
+The following Mason source types are installed via external package managers (`mason4agents doctor` reports their availability):
 
 - `npm`, `pypi`, `cargo`, `golang`, `gem`, `composer`, `luarocks`, `nuget`
 
 Build scripts (`source.build.run`) are **disabled by default** and require explicit `--allow-build-scripts`.
 
-## What is NOT in v1
+## What is NOT currently included
 
 - Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode adapters
-- MCP server
 - Automatic shell profile modification
 - Neovim/mason.nvim integration or dependency
 
