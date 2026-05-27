@@ -92,8 +92,8 @@ export function main(argv, env = process.env) {
   }
 
   const selectedPackages = selectNativePackages(options.platform, options.pack);
-  if (!options.pack && selectedPackages.length !== NATIVE_PACKAGES.length) {
-    fail("npm publish and publish dry-runs require all native packages; use --pack --platform current only for local install testing.");
+  if (!options.pack && selectedPackages.length !== NATIVE_PACKAGES.length && options.platform !== "non-windows") {
+    fail("npm publish and publish dry-runs require all native packages unless --platform non-windows is used for the temporary Windows publish hold.");
   }
 
   const artifactDir = resolve(root, options.artifactDir);
@@ -148,6 +148,7 @@ export function optionalDependenciesFor(version, nativePackages = NATIVE_PACKAGE
 
 export function selectNativePackages(selector = "all", allowCurrent = false) {
   if (selector === "all") return [...NATIVE_PACKAGES];
+  if (selector === "non-windows") return NATIVE_PACKAGES.filter((nativePackage) => nativePackage.os !== "win32");
   if (selector === "current") {
     if (!allowCurrent) fail("--platform current is only supported with --pack or --copy-local-native.");
     const current = currentNativePackage();
@@ -155,7 +156,7 @@ export function selectNativePackages(selector = "all", allowCurrent = false) {
     return [current];
   }
   const selected = NATIVE_PACKAGES.find((nativePackage) => nativePackage.key === selector || nativePackage.name === selector);
-  if (!selected) fail(`Unknown native package platform '${selector}'. Expected one of: all, current, ${NATIVE_PACKAGES.map((nativePackage) => nativePackage.key).join(", ")}.`);
+  if (!selected) fail(`Unknown native package platform '${selector}'. Expected one of: all, non-windows, current, ${NATIVE_PACKAGES.map((nativePackage) => nativePackage.key).join(", ")}.`);
   return [selected];
 }
 

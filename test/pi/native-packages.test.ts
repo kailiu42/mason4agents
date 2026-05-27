@@ -162,6 +162,29 @@ describe("native npm package staging", () => {
     expect(tarballs).toContain("mason4agents-win32-x64-9.8.7.tgz");
   }, 30_000);
 
+  test("stages only Linux and macOS packages for non-windows publish", () => {
+    const root = tempRoot();
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const outDir = join(root, "out");
+
+    const result = spawnSync(process.execPath, [publishScript, "--pack", "--platform", "non-windows", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+      cwd: root,
+      encoding: "utf8",
+      env: publishTestEnv(),
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+
+    const rootManifest = readJson(join(outDir, "staging", "mason4agents", "package.json"));
+    expect(rootManifest.optionalDependencies).toEqual(Object.fromEntries(nativePackages.slice(0, 4).map((nativePackage) => [nativePackage.name, "9.8.7"])));
+
+    const tarballs = readdirSync(join(outDir, "tarballs"));
+    expect(tarballs).toContain("mason4agents-linux-x64-gnu-9.8.7.tgz");
+    expect(tarballs).toContain("mason4agents-darwin-arm64-9.8.7.tgz");
+    expect(tarballs).not.toContain("mason4agents-win32-x64-9.8.7.tgz");
+    expect(tarballs).not.toContain("mason4agents-win32-arm64-9.8.7.tgz");
+  }, 30_000);
+
   test("publishes provenance packages with public access for first publish", () => {
     const root = tempRoot();
     writeRootPackage(root);
@@ -197,7 +220,7 @@ describe("native npm package staging", () => {
     const { fakeBin, logPath } = writeFakeNpm(root);
     const existing = nativePackages.slice(0, 4).map((nativePackage) => `${nativePackage.name}@9.8.7`);
 
-    const result = spawnSync(process.execPath, [publishScript, "--provenance", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+    const result = spawnSync(process.execPath, [publishScript, "--provenance", "--platform", "non-windows", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
       cwd: root,
       encoding: "utf8",
       env: {
@@ -210,10 +233,6 @@ describe("native npm package staging", () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const publishArgs = loggedNpmArgs(logPath).filter((args) => args[0] === "publish");
-    expect(publishArgs.map((args) => args[1]?.split("/").at(-1))).toEqual([
-      "mason4agents-win32-x64",
-      "mason4agents-win32-arm64",
-      "mason4agents",
-    ]);
+    expect(publishArgs.map((args) => args[1]?.split("/").at(-1))).toEqual(["mason4agents"]);
   }, 30_000);
 });
