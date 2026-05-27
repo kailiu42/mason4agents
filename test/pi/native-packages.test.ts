@@ -73,6 +73,53 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
+function writeFakeNpm(root: string): { fakeBin: string; logPath: string } {
+  const fakeBin = join(root, "bin");
+  const logPath = join(root, "npm.log");
+  mkdirSync(fakeBin, { recursive: true });
+  const fakeNpm = join(fakeBin, "npm");
+  writeFileSync(fakeNpm, `#!/usr/bin/env bun
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.M4A_NPM_LOG, \`\${process.cwd()}|\${args.join("\\u001f")}\\n\`);
+
+if (args[0] === "view") {
+  const spec = args[1];
+  const existing = new Set((process.env.M4A_NPM_EXISTING ?? "").split(",").filter(Boolean));
+  if (existing.has(spec)) {
+    console.log(spec.slice(spec.lastIndexOf("@") + 1));
+    process.exit(0);
+  }
+  console.error("npm error code E404");
+  console.error(\`npm error 404 Not Found - GET https://registry.npmjs.org/\${spec}\`);
+  process.exit(1);
+}
+
+if (args[0] === "pack") {
+  const files = ["package.json", "LICENSE"];
+  for (const path of ["README.md", "dist/bin/mason4agents.js", "dist/pi/extension.js", "bin/mason4agents", "bin/mason4agents.exe"]) {
+    if (existsSync(join(process.cwd(), path))) files.push(path);
+  }
+  console.log(JSON.stringify([{ filename: "fixture.tgz", files: files.map((path) => ({ path })) }]));
+  process.exit(0);
+}
+
+if (args[0] === "publish") process.exit(0);
+process.exit(1);
+`);
+  chmodSync(fakeNpm, 0o755);
+  return { fakeBin, logPath };
+}
+
+function loggedNpmArgs(logPath: string): string[][] {
+  return readFileSync(logPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => line.split("|")[1]?.split("\u001f") ?? []);
+}
+
 describe("native npm package staging", () => {
   test("stages all native optional dependency packages before the root package", () => {
     const root = tempRoot();
@@ -120,30 +167,7 @@ describe("native npm package staging", () => {
     writeRootPackage(root);
     const artifacts = writeArtifacts(root);
     const outDir = join(root, "out");
-    const fakeBin = join(root, "bin");
-    const logPath = join(root, "npm.log");
-    mkdirSync(fakeBin, { recursive: true });
-    const fakeNpm = join(fakeBin, "npm");
-    writeFileSync(fakeNpm, `#!/usr/bin/env bun
-import { appendFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-
-const args = process.argv.slice(2);
-appendFileSync(process.env.M4A_NPM_LOG, \`\${process.cwd()}|\${args.join("\\u001f")}\\n\`);
-
-if (args[0] === "pack") {
-  const files = ["package.json", "LICENSE"];
-  for (const path of ["README.md", "dist/bin/mason4agents.js", "dist/pi/extension.js", "bin/mason4agents", "bin/mason4agents.exe"]) {
-    if (existsSync(join(process.cwd(), path))) files.push(path);
-  }
-  console.log(JSON.stringify([{ filename: "fixture.tgz", files: files.map((path) => ({ path })) }]));
-  process.exit(0);
-}
-
-if (args[0] === "publish") process.exit(0);
-process.exit(1);
-`);
-    chmodSync(fakeNpm, 0o755);
+    const { fakeBin, logPath } = writeFakeNpm(root);
 
     const result = spawnSync(process.execPath, [publishScript, "--dry-run", "--provenance", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
       cwd: root,
@@ -156,16 +180,40 @@ process.exit(1);
     });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
-    const publishArgs = readFileSync(logPath, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => line.split("|")[1]?.split("\u001f") ?? [])
-      .filter((args) => args[0] === "publish");
+    const publishArgs = loggedNpmArgs(logPath).filter((args) => args[0] === "publish");
     expect(publishArgs).toHaveLength(7);
     for (const args of publishArgs) {
       expect(args).toContain("--provenance");
       expect(args).toContain("--access");
       expect(args).toContain("public");
     }
+  }, 30_000);
+
+  test("skips already published package versions when resuming publish", () => {
+    const root = tempRoot();
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const outDir = join(root, "out");
+    const { fakeBin, logPath } = writeFakeNpm(root);
+    const existing = nativePackages.slice(0, 4).map((nativePackage) => `${nativePackage.name}@9.8.7`);
+
+    const result = spawnSync(process.execPath, [publishScript, "--provenance", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...publishTestEnv(),
+        M4A_NPM_EXISTING: existing.join(","),
+        M4A_NPM_LOG: logPath,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+
+    const publishArgs = loggedNpmArgs(logPath).filter((args) => args[0] === "publish");
+    expect(publishArgs.map((args) => args[1]?.split("/").at(-1))).toEqual([
+      "mason4agents-win32-x64",
+      "mason4agents-win32-arm64",
+      "mason4agents",
+    ]);
   }, 30_000);
 });

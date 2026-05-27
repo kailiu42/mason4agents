@@ -291,9 +291,33 @@ export function npmPublishArgs(packageDir, { dryRun, provenance }) {
 
 function publishStagedPackages(staged, { dryRun, provenance }) {
   for (const stagedPackage of [...staged.native, staged.rootPackage]) {
+    if (!dryRun && packageVersionExists(stagedPackage.name, staged.pkg.version, staged.root)) {
+      console.log(`Skipping ${stagedPackage.name}@${staged.pkg.version}; already published.`);
+      continue;
+    }
     const args = npmPublishArgs(stagedPackage.packageDir, { dryRun, provenance });
     run("npm", args, staged.root);
   }
+}
+
+function packageVersionExists(name, version, cwd) {
+  const spec = `${name}@${version}`;
+  console.log(`\n> npm view ${spec} version`);
+  const result = spawnSync("npm", ["view", spec, "version"], {
+    cwd,
+    encoding: "utf8",
+    env: process.env,
+    shell: process.platform === "win32",
+  });
+  if (result.status === 0) {
+    return result.stdout.trim() === version;
+  }
+  if (result.stderr?.includes("E404") || result.stderr?.includes("404 Not Found")) {
+    return false;
+  }
+  if (result.stderr) process.stderr.write(result.stderr);
+  exitOnFailure("npm", result);
+  return false;
 }
 
 function copyLocalNative(root, selector) {
