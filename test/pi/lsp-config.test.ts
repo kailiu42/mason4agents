@@ -39,7 +39,7 @@ describe("Mason LSP config sync", () => {
     expect(result).toMatchObject({ configPath, servers: ["rust-analyzer"], changed: true });
     expect(json.mason4agents).toMatchObject({ generated: true, binDir, servers: ["rust-analyzer"] });
     expect(json.servers).toMatchObject({
-      "rust-analyzer": { command: join(binDir, "rust-analyzer") },
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), warmupTimeoutMs: 5000 },
     });
   });
 
@@ -88,6 +88,7 @@ describe("Mason LSP config sync", () => {
         fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
         rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
         initOptions: { hostInfo: "omp-coding-agent" },
+        warmupTimeoutMs: 5000,
       },
     });
   });
@@ -143,7 +144,7 @@ describe("Mason LSP config sync", () => {
     const json = readJson(configPath);
 
     expect(json.servers).toMatchObject({
-      "typescript-language-server": { command: join(binDir, "typescript-language-server") },
+      "typescript-language-server": { command: join(binDir, "typescript-language-server"), warmupTimeoutMs: 5000 },
     });
   });
 
@@ -215,8 +216,8 @@ describe("Mason LSP config sync", () => {
       lspPackages: ["rust-analyzer", "typescript-language-server"],
     });
     expect(json.servers).toMatchObject({
-      "rust-analyzer": { command: join(binDir, "rust-analyzer") },
-      "typescript-language-server": { command: join(binDir, "typescript-language-server") },
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), warmupTimeoutMs: 5000 },
+      "typescript-language-server": { command: join(binDir, "typescript-language-server"), warmupTimeoutMs: 5000 },
     });
     expect((json.servers as Record<string, unknown>).rust_analyzer).toBeUndefined();
     expect((json.servers as Record<string, unknown>).ts_ls).toBeUndefined();
@@ -280,7 +281,7 @@ describe("Mason LSP config sync", () => {
       changed: true,
     });
     expect(json.servers).toMatchObject({
-      toy_ls: { command: join(binDir, "toy-language-server") },
+      toy_ls: { command: join(binDir, "toy-language-server"), warmupTimeoutMs: 5000 },
     });
     expect((json.servers as Record<string, unknown>).toyfmt).toBeUndefined();
   });
@@ -343,8 +344,27 @@ describe("Mason LSP config sync", () => {
     const json = readJson(configPath);
 
     expect(json.servers).toMatchObject({
-      "rust-analyzer": { command: join(binDir, "rust-analyzer"), args: ["--stdio"] },
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), args: ["--stdio"], warmupTimeoutMs: 5000 },
       custom: { command: "custom-ls" },
+    });
+  });
+
+  test("preserves larger existing generated warmup timeout", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, JSON.stringify({
+      servers: {
+        "rust-analyzer": { command: "rust-analyzer", warmupTimeoutMs: 10000 },
+      },
+    }));
+
+    syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(json.servers).toMatchObject({
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), warmupTimeoutMs: 10000 },
     });
   });
 

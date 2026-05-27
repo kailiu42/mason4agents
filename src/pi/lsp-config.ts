@@ -5,6 +5,7 @@ import { masonBinDir, masonCacheDir, masonStateDir } from "./path-env";
 import { ompBuiltInServerNames } from "./omp-lsp-defaults";
 
 const CONFIG_FILE = "lsp.json";
+const GENERATED_LSP_WARMUP_TIMEOUT_MS = 5000;
 
 const MASON_LSP_COMMANDS: readonly [server: string, command: string][] = [
   ["rust-analyzer", "rust-analyzer"],
@@ -75,6 +76,7 @@ type OmpLspServerConfig = {
   fileTypes?: string[];
   rootMarkers?: string[];
   initOptions?: Record<string, unknown>;
+  warmupTimeoutMs?: number;
 };
 
 export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonLspConfigSyncResult {
@@ -111,7 +113,7 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
       changed = true;
       continue;
     }
-    const next = { ...current, ...config };
+    const next = mergeServerConfig(current, config);
     if (shouldUpdateServerConfig(current, next, binDir)) {
       nextServers[server] = next;
       changed = true;
@@ -152,11 +154,15 @@ function masonLspOverrides(env: NodeJS.ProcessEnv, binDir: string): { configs: R
   return { configs, packages };
 }
 
+function generatedLspServerConfig(command: string): OmpLspServerConfig {
+  return { command, warmupTimeoutMs: GENERATED_LSP_WARMUP_TIMEOUT_MS };
+}
+
 function staticMasonLspOverrides(binDir: string): Record<string, OmpLspServerConfig> {
   const overrides: Record<string, OmpLspServerConfig> = {};
   for (const [server, command] of MASON_LSP_COMMANDS) {
     const executable = resolveBinExecutable(binDir, command);
-    if (executable) overrides[server] = { command: executable };
+    if (executable) overrides[server] = generatedLspServerConfig(executable);
   }
   return overrides;
 }
@@ -177,7 +183,7 @@ function dynamicMasonLspOverrides(
     const executable = resolveBinExecutable(binDir, preferredBinName(installedPackage, packageName, server));
     if (!executable) continue;
     const config = builtInServers.has(server)
-      ? { command: executable }
+      ? generatedLspServerConfig(executable)
       : lspServerConfig(packageName, spec, executable);
     if (!config) continue;
     result.push({ package: packageName, server, config });
@@ -236,7 +242,7 @@ function preferredBinName(installedPackage: Record<string, unknown>, packageName
 function lspServerConfig(packageName: string, spec: Record<string, unknown>, command: string): OmpLspServerConfig | undefined {
   const template = lspConfigTemplate(packageName, spec);
   if (!template) return undefined;
-  return { command, ...template };
+  return { command, warmupTimeoutMs: GENERATED_LSP_WARMUP_TIMEOUT_MS, ...template };
 }
 
 function lspConfigTemplate(packageName: string, spec: Record<string, unknown>): Omit<OmpLspServerConfig, "command"> | undefined {
@@ -296,6 +302,17 @@ function isFileLike(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function mergeServerConfig(current: Record<string, unknown>, config: OmpLspServerConfig): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current, ...config };
+  if (
+    typeof current.warmupTimeoutMs === "number"
+    && current.warmupTimeoutMs > GENERATED_LSP_WARMUP_TIMEOUT_MS
+  ) {
+    next.warmupTimeoutMs = current.warmupTimeoutMs;
+  }
+  return next;
 }
 
 function shouldUpdateServerConfig(current: Record<string, unknown>, next: Record<string, unknown>, binDir: string): boolean {
