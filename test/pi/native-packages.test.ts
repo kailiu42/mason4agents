@@ -61,6 +61,14 @@ function writeArtifacts(root: string): string {
   return artifacts;
 }
 
+function publishTestEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.GITHUB_REF;
+  delete env.GITHUB_REF_NAME;
+  delete env.GITHUB_REF_TYPE;
+  return env;
+}
+
 function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
@@ -75,6 +83,7 @@ describe("native npm package staging", () => {
     const result = spawnSync(process.execPath, [publishScript, "--pack", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
       cwd: root,
       encoding: "utf8",
+      env: publishTestEnv(),
     });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
