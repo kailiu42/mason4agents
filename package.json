@@ -34,15 +34,17 @@
     "package.json"
   ],
   "scripts": {
+    "check:version": "bun scripts/sync-version.mjs --check",
+    "sync:version": "bun scripts/sync-version.mjs",
     "typecheck": "tsc --noEmit",
-    "verify": "bun run typecheck && cargo test && bun test",
+    "verify": "bun run check:version && bun run typecheck && cargo test && bun test",
     "build:js": "bun build src/bin/mason4agents.ts --outdir dist/bin --target bun && bun build src/pi/extension.ts --outdir dist/pi --target bun",
     "build:native": "cargo build --release && bun scripts/publish.mjs --copy-local-native",
     "build": "bun run build:js && bun run build:native",
     "test": "bun test",
-    "pack:local": "bun run build && bun scripts/publish.mjs --pack --platform current",
+    "pack:local": "bun run check:version && bun run build && bun scripts/publish.mjs --pack --platform current",
     "publish:local": "bun run pack:local",
-    "publish:npm": "bun scripts/publish.mjs"
+    "publish:npm": "bun run check:version && bun scripts/publish.mjs"
   },
   "devDependencies": {
     "@types/bun": "latest",
