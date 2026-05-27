@@ -282,11 +282,16 @@ function packStagedPackages(staged, tarballDir) {
   console.log(`Tarballs written to ${tarballDir}`);
 }
 
+export function npmPublishArgs(packageDir, { dryRun, provenance }) {
+  const args = ["publish", packageDir];
+  if (dryRun) args.push("--dry-run");
+  if (provenance) args.push("--provenance", "--access", "public");
+  return args;
+}
+
 function publishStagedPackages(staged, { dryRun, provenance }) {
   for (const stagedPackage of [...staged.native, staged.rootPackage]) {
-    const args = ["publish", stagedPackage.packageDir];
-    if (dryRun) args.push("--dry-run");
-    if (provenance) args.push("--provenance");
+    const args = npmPublishArgs(stagedPackage.packageDir, { dryRun, provenance });
     run("npm", args, staged.root);
   }
 }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -113,5 +113,59 @@ describe("native npm package staging", () => {
     expect(tarballs).toContain("mason4agents-9.8.7.tgz");
     expect(tarballs).toContain("mason4agents-linux-x64-gnu-9.8.7.tgz");
     expect(tarballs).toContain("mason4agents-win32-x64-9.8.7.tgz");
+  }, 30_000);
+
+  test("publishes provenance packages with public access for first publish", () => {
+    const root = tempRoot();
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const outDir = join(root, "out");
+    const fakeBin = join(root, "bin");
+    const logPath = join(root, "npm.log");
+    mkdirSync(fakeBin, { recursive: true });
+    const fakeNpm = join(fakeBin, "npm");
+    writeFileSync(fakeNpm, `#!/usr/bin/env bun
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.M4A_NPM_LOG, \`\${process.cwd()}|\${args.join("\\u001f")}\\n\`);
+
+if (args[0] === "pack") {
+  const files = ["package.json", "LICENSE"];
+  for (const path of ["README.md", "dist/bin/mason4agents.js", "dist/pi/extension.js", "bin/mason4agents", "bin/mason4agents.exe"]) {
+    if (existsSync(join(process.cwd(), path))) files.push(path);
+  }
+  console.log(JSON.stringify([{ filename: "fixture.tgz", files: files.map((path) => ({ path })) }]));
+  process.exit(0);
+}
+
+if (args[0] === "publish") process.exit(0);
+process.exit(1);
+`);
+    chmodSync(fakeNpm, 0o755);
+
+    const result = spawnSync(process.execPath, [publishScript, "--dry-run", "--provenance", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...publishTestEnv(),
+        M4A_NPM_LOG: logPath,
+        PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+
+    const publishArgs = readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => line.split("|")[1]?.split("\u001f") ?? [])
+      .filter((args) => args[0] === "publish");
+    expect(publishArgs).toHaveLength(7);
+    for (const args of publishArgs) {
+      expect(args).toContain("--provenance");
+      expect(args).toContain("--access");
+      expect(args).toContain("public");
+    }
   }, 30_000);
 });
