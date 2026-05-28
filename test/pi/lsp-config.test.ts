@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncMasonLspConfig } from "../../src/pi/lsp-config";
@@ -223,7 +223,7 @@ describe("Mason LSP config sync", () => {
     expect((json.servers as Record<string, unknown>).ts_ls).toBeUndefined();
   });
 
-  test("syncs installed registry LSP packages beyond the static fallback list", () => {
+  test("does not sync unverified custom LSP packages from registry metadata alone", () => {
     const { root, env, binDir, configPath } = tempEnv();
     mkdirSync(binDir, { recursive: true });
     writeFileSync(join(binDir, "toy-language-server"), "");
@@ -272,34 +272,30 @@ describe("Mason LSP config sync", () => {
     }));
 
     const result = syncMasonLspConfig(env);
-    const json = readJson(configPath);
 
     expect(result).toMatchObject({
       configPath,
-      servers: ["toy_ls"],
-      lspPackages: ["toy-language-server"],
-      changed: true,
+      servers: [],
+      lspPackages: [],
+      changed: false,
     });
-    expect(json.servers).toMatchObject({
-      toy_ls: { command: join(binDir, "toy-language-server"), warmupTimeoutMs: 5000 },
-    });
-    expect((json.servers as Record<string, unknown>).toyfmt).toBeUndefined();
+    expect(existsSync(configPath)).toBe(false);
   });
 
-  test("register command helper updates OMP from installed LSP metadata", () => {
+  test("does not auto-configure path-sensitive custom YAML LSP packages", () => {
     const { root, env, binDir, configPath } = tempEnv();
     mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(binDir, "toy-language-server"), "");
+    writeFileSync(join(binDir, "gh-actions-language-server"), "");
 
     const stateFile = join(root, ".local", "state", "mason4agents", "installed.json");
     mkdirSync(dirname(stateFile), { recursive: true });
     writeFileSync(stateFile, JSON.stringify({
       packages: {
-        "toy-language-server": {
-          name: "toy-language-server",
-          version: "1.0.0",
-          source_id: "pkg:generic/acme/toy-language-server@1.0.0",
-          bins: { "toy-language-server": "bin/toy-language-server" },
+        "gh-actions-language-server": {
+          name: "gh-actions-language-server",
+          version: "0.3.57",
+          source_id: "pkg:npm/%40actions/languageserver@0.3.57",
+          bins: { "gh-actions-language-server": "bin/actions-languageserver" },
           share: {},
           opt: {},
           installed_at: "2026-01-01T00:00:00Z",
@@ -311,11 +307,115 @@ describe("Mason LSP config sync", () => {
     mkdirSync(dirname(registryFile), { recursive: true });
     writeFileSync(registryFile, JSON.stringify({
       packages: {
-        "toy-language-server": {
-          name: "toy-language-server",
+        "gh-actions-language-server": {
+          name: "gh-actions-language-server",
+          categories: ["LSP"],
+          languages: ["YAML"],
+          neovim: { lspconfig: "gh_actions_ls" },
+        },
+      },
+    }));
+
+    const result = syncMasonLspConfig(env);
+
+    expect(result).toMatchObject({
+      configPath,
+      servers: [],
+      lspPackages: [],
+      changed: false,
+    });
+    expect(existsSync(configPath)).toBe(false);
+  });
+
+  test("removes previously generated unsupported custom LSP overrides", () => {
+    const { root, env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "gh-actions-language-server"), "");
+    writeFileSync(configPath, JSON.stringify({
+      mason4agents: {
+        generated: true,
+        binDir,
+        servers: ["gh_actions_ls"],
+        lspPackages: ["gh-actions-language-server"],
+      },
+      servers: {
+        gh_actions_ls: {
+          command: join(binDir, "gh-actions-language-server"),
+          warmupTimeoutMs: 5000,
+          fileTypes: [".yaml", ".yml"],
+          rootMarkers: [".git"],
+        },
+      },
+    }));
+
+    const stateFile = join(root, ".local", "state", "mason4agents", "installed.json");
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, JSON.stringify({
+      packages: {
+        "gh-actions-language-server": {
+          name: "gh-actions-language-server",
+          version: "0.3.57",
+          source_id: "pkg:npm/%40actions/languageserver@0.3.57",
+          bins: { "gh-actions-language-server": "bin/actions-languageserver" },
+          share: {},
+          opt: {},
+          installed_at: "2026-01-01T00:00:00Z",
+        },
+      },
+    }));
+
+    const registryFile = join(root, ".cache", "mason4agents", "registry", "index.json");
+    mkdirSync(dirname(registryFile), { recursive: true });
+    writeFileSync(registryFile, JSON.stringify({
+      packages: {
+        "gh-actions-language-server": {
+          name: "gh-actions-language-server",
+          categories: ["LSP"],
+          languages: ["YAML"],
+          neovim: { lspconfig: "gh_actions_ls" },
+        },
+      },
+    }));
+
+    const result = syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(result).toMatchObject({ servers: [], lspPackages: [], changed: true });
+    expect((json.servers as Record<string, unknown>).gh_actions_ls).toBeUndefined();
+    expect(json.mason4agents).toMatchObject({ generated: true, binDir, servers: [], lspPackages: [] });
+  });
+
+  test("register command helper updates OMP from verified custom LSP metadata", () => {
+    const { root, env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, "vtsls"), "");
+
+    const stateFile = join(root, ".local", "state", "mason4agents", "installed.json");
+    mkdirSync(dirname(stateFile), { recursive: true });
+    writeFileSync(stateFile, JSON.stringify({
+      packages: {
+        vtsls: {
+          name: "vtsls",
+          version: "1.0.0",
+          source_id: "pkg:npm/vtsls@1.0.0",
+          bins: { vtsls: "bin/vtsls" },
+          share: {},
+          opt: {},
+          installed_at: "2026-01-01T00:00:00Z",
+        },
+      },
+    }));
+
+    const registryFile = join(root, ".cache", "mason4agents", "registry", "index.json");
+    mkdirSync(dirname(registryFile), { recursive: true });
+    writeFileSync(registryFile, JSON.stringify({
+      packages: {
+        vtsls: {
+          name: "vtsls",
           categories: ["LSP"],
           languages: ["TypeScript"],
-          neovim: { lspconfig: "toy_ls" },
+          neovim: { lspconfig: "vtsls" },
         },
       },
     }));
@@ -323,9 +423,9 @@ describe("Mason LSP config sync", () => {
     const result = registerInstalledTools(["--omp"], env);
     const text = renderRegisterResult(result);
 
-    expect(result.omp).toMatchObject({ configPath, servers: ["toy_ls"], lspPackages: ["toy-language-server"], changed: true });
+    expect(result.omp).toMatchObject({ configPath, servers: ["vtsls"], lspPackages: ["vtsls"], changed: true });
     expect(text).toContain("OMP config");
-    expect(text).toContain("toy_ls");
+    expect(text).toContain("vtsls");
   });
 
   test("merges with existing server settings", () => {

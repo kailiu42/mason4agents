@@ -79,6 +79,20 @@ type OmpLspServerConfig = {
   warmupTimeoutMs?: number;
 };
 
+type CustomLspTemplate = Omit<OmpLspServerConfig, "command"> & {
+  bin?: string;
+};
+
+const VERIFIED_CUSTOM_LSP_TEMPLATES: Record<string, CustomLspTemplate> = {
+  vtsls: {
+    bin: "vtsls",
+    args: ["--stdio"],
+    fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+    rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
+    initOptions: { hostInfo: "omp-coding-agent" },
+  },
+};
+
 export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonLspConfigSyncResult {
   const configPath = join(ompAgentDir(env), CONFIG_FILE);
   const binDir = masonBinDir(env);
@@ -180,7 +194,10 @@ function dynamicMasonLspOverrides(
     const spec = registry[packageName];
     if (!spec || !isLspPackage(spec)) continue;
     const server = preferredLspServerName(packageName, spec, builtInServers);
-    const executable = resolveBinExecutable(binDir, preferredBinName(installedPackage, packageName, server));
+    const executable = resolveBinExecutable(
+      binDir,
+      preferredBinName(installedPackage, packageName, server, customLspBinName(packageName, spec)),
+    );
     if (!executable) continue;
     const config = builtInServers.has(server)
       ? generatedLspServerConfig(executable)
@@ -230,56 +247,36 @@ function preferredLspServerName(
   return lspconfig || packageName;
 }
 
-function preferredBinName(installedPackage: Record<string, unknown>, packageName: string, server: string): string {
+function preferredBinName(
+  installedPackage: Record<string, unknown>,
+  packageName: string,
+  server: string,
+  preferred?: string,
+): string {
   const bins = Object.keys(recordValue(installedPackage.bins) ?? {}).sort((left, right) => left.localeCompare(right));
-  return bins.find((bin) => bin === packageName)
+  return (preferred && bins.includes(preferred) ? preferred : undefined)
+    ?? bins.find((bin) => bin === packageName)
     ?? bins.find((bin) => bin === server)
     ?? bins.find((bin) => bin.includes("language-server"))
     ?? bins[0]
+    ?? preferred
     ?? packageName;
 }
 
 function lspServerConfig(packageName: string, spec: Record<string, unknown>, command: string): OmpLspServerConfig | undefined {
-  const template = lspConfigTemplate(packageName, spec);
+  const template = customLspTemplate(packageName, spec);
   if (!template) return undefined;
-  return { command, warmupTimeoutMs: GENERATED_LSP_WARMUP_TIMEOUT_MS, ...template };
+  const { bin: _bin, ...config } = template;
+  return { command, warmupTimeoutMs: GENERATED_LSP_WARMUP_TIMEOUT_MS, ...config };
 }
 
-function lspConfigTemplate(packageName: string, spec: Record<string, unknown>): Omit<OmpLspServerConfig, "command"> | undefined {
-  if (packageName === "vtsls") {
-    return {
-      args: ["--stdio"],
-      fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
-      rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
-      initOptions: { hostInfo: "omp-coding-agent" },
-    };
-  }
-
-  return lspDefaultsForLanguages(stringValues(spec.languages));
+function customLspTemplate(packageName: string, spec: Record<string, unknown>): CustomLspTemplate | undefined {
+  const server = stringValue(recordValue(spec.neovim)?.lspconfig);
+  return (server ? VERIFIED_CUSTOM_LSP_TEMPLATES[server] : undefined) ?? VERIFIED_CUSTOM_LSP_TEMPLATES[packageName];
 }
 
-function lspDefaultsForLanguages(languages: readonly string[]): Omit<OmpLspServerConfig, "command"> | undefined {
-  const normalized = new Set(languages.map((language) => language.toLocaleLowerCase()));
-  if (normalized.has("typescript") || normalized.has("javascript")) {
-    return {
-      args: ["--stdio"],
-      fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
-      rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
-    };
-  }
-  if (normalized.has("rust")) return { fileTypes: [".rs"], rootMarkers: ["Cargo.toml", "rust-analyzer.toml"] };
-  if (normalized.has("go")) return { fileTypes: [".go", ".mod", ".sum"], rootMarkers: ["go.mod", "go.work", "go.sum"] };
-  if (normalized.has("python")) return { fileTypes: [".py", ".pyi"], rootMarkers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"] };
-  if (normalized.has("lua")) return { fileTypes: [".lua"], rootMarkers: [".luarc.json", ".luarc.jsonc", "stylua.toml", ".git"] };
-  if (normalized.has("shell") || normalized.has("bash")) return { fileTypes: [".sh", ".bash", ".zsh"], rootMarkers: [".git"] };
-  if (normalized.has("java")) return { fileTypes: [".java"], rootMarkers: ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", ".project"] };
-  if (normalized.has("ruby")) return { fileTypes: [".rb", ".rake", ".gemspec"], rootMarkers: ["Gemfile", ".ruby-version", ".ruby-gemset"] };
-  if (normalized.has("php")) return { fileTypes: [".php"], rootMarkers: ["composer.json", ".git"] };
-  if (normalized.has("docker")) return { fileTypes: ["Dockerfile"], rootMarkers: [".git"] };
-  if (normalized.has("terraform")) return { fileTypes: [".tf", ".tfvars"], rootMarkers: [".git"] };
-  if (normalized.has("yaml")) return { fileTypes: [".yaml", ".yml"], rootMarkers: [".git"] };
-  if (normalized.has("markdown")) return { fileTypes: [".md", ".mdx"], rootMarkers: [".git"] };
-  return undefined;
+function customLspBinName(packageName: string, spec: Record<string, unknown>): string | undefined {
+  return customLspTemplate(packageName, spec)?.bin;
 }
 
 
