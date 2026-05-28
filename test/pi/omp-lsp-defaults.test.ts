@@ -32,6 +32,7 @@ describe("OMP default LSP cache sync", () => {
       "typescript-language-server": { command: "typescript-language-server" },
       pyright: { command: "pyright-langserver" },
       marksman: { command: "marksman" },
+      dockerls: { command: "docker-langserver" },
     }));
 
     const result = syncOmpLspDefaultsCache(env);
@@ -46,7 +47,7 @@ describe("OMP default LSP cache sync", () => {
       cachePath,
       changed: true,
       sourcePath: defaultsPath,
-      signals: ["rust", "python", "typescript", "markdown"],
+      signals: ["rust", "python", "typescript", "docker", "markdown"],
     });
     expect(cache.source).toBe("omp-default-lsp");
     expect(cache.source_ref).toBe(defaultsPath);
@@ -57,6 +58,7 @@ describe("OMP default LSP cache sync", () => {
       { signal: "rust", packages: ["rust-analyzer"] },
       { signal: "python", packages: ["pyright"] },
       { signal: "typescript", packages: ["typescript-language-server"] },
+      { signal: "docker", packages: ["dockerfile-language-server"] },
       { signal: "markdown", packages: ["marksman"] },
     ]);
   });

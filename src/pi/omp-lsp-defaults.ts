@@ -55,7 +55,7 @@ const OMP_LSP_RULES: ReadonlyArray<{ signal: string; server: string; package: st
   { signal: "typescript", server: "typescript-language-server", package: "typescript-language-server" },
   { signal: "lua", server: "lua-language-server", package: "lua-language-server" },
   { signal: "shell", server: "bashls", package: "bash-language-server" },
-  { signal: "docker", server: "dockerls", package: "docker-langserver" },
+  { signal: "docker", server: "dockerls", package: "dockerfile-language-server" },
   { signal: "terraform", server: "terraformls", package: "terraform-ls" },
   { signal: "yaml", server: "yamlls", package: "yaml-language-server" },
   { signal: "markdown", server: "marksman", package: "marksman" },
