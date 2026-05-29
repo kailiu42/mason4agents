@@ -81,6 +81,7 @@ impl Installer {
             requests,
             registry_source,
             allow_build_scripts,
+            false,
             progress,
         )
     }
@@ -91,6 +92,7 @@ impl Installer {
         requests: &[String],
         registry_source: Option<&str>,
         allow_build_scripts: bool,
+        skip_missing_installed: bool,
         progress: &dyn ProgressSink,
     ) -> Result<Vec<InstallResult>> {
         let result = (|| -> Result<Vec<InstallResult>> {
@@ -106,6 +108,20 @@ impl Installer {
             let mut out = Vec::new();
             for request in requests {
                 let (name, version) = parse_package_request(request);
+                if skip_missing_installed {
+                    let _state_lock = acquire_state_lock(&self.paths)?;
+                    let state = InstalledState::load(&self.paths)?;
+                    if !state.packages.contains_key(name) {
+                        progress.event(
+                            operation,
+                            "package",
+                            ProgressStatus::Succeeded,
+                            Some(name),
+                            "package is no longer installed; skipping update",
+                        );
+                        continue;
+                    }
+                }
                 progress.event(
                     operation,
                     "resolve",
@@ -115,12 +131,15 @@ impl Installer {
                 );
                 let normalized =
                     normalize_package(&cache, name, version.as_deref(), &self.platform)?;
-                out.push(self.install_normalized_with_progress(
+                if let Some(result) = self.install_normalized_for_request(
                     operation,
                     normalized,
                     allow_build_scripts,
+                    skip_missing_installed,
                     progress,
-                )?);
+                )? {
+                    out.push(result);
+                }
             }
             Ok(out)
         })();
@@ -169,7 +188,8 @@ impl Installer {
             );
             let _state_lock = acquire_state_lock(&self.paths)?;
             let state = InstalledState::load(&self.paths)?;
-            let requests = if packages.is_empty() {
+            let update_all = packages.is_empty();
+            let requests = if update_all {
                 state.packages.keys().cloned().collect::<Vec<_>>()
             } else {
                 packages.to_vec()
@@ -183,6 +203,7 @@ impl Installer {
                 &requests,
                 registry_source,
                 allow_build_scripts,
+                update_all,
                 progress,
             )
         })();
@@ -321,13 +342,14 @@ impl Installer {
         })
     }
 
-    fn install_normalized_with_progress(
+    fn install_normalized_for_request(
         &self,
         operation: &str,
         package: NormalizedPackage,
         allow_build_scripts: bool,
+        skip_missing_installed: bool,
         progress: &dyn ProgressSink,
-    ) -> Result<InstallResult> {
+    ) -> Result<Option<InstallResult>> {
         let package_name = package.name.clone();
         progress.event(
             operation,
@@ -336,7 +358,7 @@ impl Installer {
             Some(&package_name),
             "starting package install",
         );
-        let result = (|| -> Result<InstallResult> {
+        let result = (|| -> Result<Option<InstallResult>> {
             validate_package_name(&package.name)?;
             let name = &package.name;
             for spec in ["bins", "share", "opt"] {
@@ -369,6 +391,19 @@ impl Installer {
             );
             let _state_lock = acquire_state_lock(&self.paths)?;
             let _lock = PackageLock::acquire(&self.paths, &package.name)?;
+            if skip_missing_installed {
+                let state = InstalledState::load(&self.paths)?;
+                if !state.packages.contains_key(&package.name) {
+                    progress.event(
+                        operation,
+                        "package",
+                        ProgressStatus::Succeeded,
+                        Some(&package.name),
+                        "package is no longer installed; skipping update",
+                    );
+                    return Ok(None);
+                }
+            }
             let staging = self.paths.package_tmp_dir(&package.name);
             let final_dir = self.paths.package_dir(&package.name);
             let old_dir = self.paths.package_old_dir(&package.name);
@@ -483,9 +518,6 @@ impl Installer {
                     return Err(err);
                 }
             };
-            if old_dir.exists() {
-                remove_dir_if_exists(&old_dir)?;
-            }
             let installed = InstalledPackage {
                 name: package.name.clone(),
                 version: package.version.clone(),
@@ -502,24 +534,43 @@ impl Installer {
                 Some(&package.name),
                 "writing install state",
             );
-            state.packages.insert(package.name.clone(), installed);
-            state.save(&self.paths)?;
-            Ok(InstallResult {
+            state
+                .packages
+                .insert(package.name.clone(), installed.clone());
+            if let Err(err) = state.save(&self.paths) {
+                if let Err(rollback_err) = rollback_committed_install(
+                    &self.paths,
+                    &installed,
+                    previous_receipt.as_ref(),
+                    &final_dir,
+                    &old_dir,
+                ) {
+                    return Err(msg(format!(
+                        "failed to save install state ({err}); rollback failed: {rollback_err}"
+                    )));
+                }
+                return Err(err);
+            }
+            if old_dir.exists() {
+                remove_dir_if_exists(&old_dir)?;
+            }
+            Ok(Some(InstallResult {
                 package: package.name,
                 version: package.version,
                 source_id: package.source.id,
                 bins: receipt.bins,
                 package_dir: final_dir,
-            })
+            }))
         })();
         match &result {
-            Ok(_) => progress.event(
+            Ok(Some(_)) => progress.event(
                 operation,
                 "package",
                 ProgressStatus::Succeeded,
                 Some(&package_name),
                 "package installed",
             ),
+            Ok(None) => {}
             Err(err) => emit_error(progress, operation, "package", Some(&package_name), err),
         }
         result
@@ -718,6 +769,33 @@ fn remove_dir_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+fn rollback_committed_install(
+    paths: &MasonPaths,
+    installed: &InstalledPackage,
+    previous: Option<&InstalledPackage>,
+    final_dir: &Path,
+    old_dir: &Path,
+) -> Result<()> {
+    cleanup_package_links(paths, installed)?;
+    remove_dir_if_exists(final_dir)?;
+    if old_dir.exists() {
+        fs::rename(old_dir, final_dir)?;
+    }
+    if let Some(previous) = previous {
+        if final_dir.exists() {
+            create_package_links(
+                paths,
+                &previous.name,
+                final_dir,
+                &previous.bins,
+                &previous.share,
+                &previous.opt,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Validate that a package name does not contain path separators or special
 /// path segments that could lead to directory traversal.
 pub(crate) fn validate_package_name(name: &str) -> Result<()> {
@@ -771,16 +849,26 @@ mod tests {
         MasonPaths::from_getter(|key| env.get(key).cloned()).unwrap()
     }
 
-    fn write_zip(path: &Path) {
+    fn write_zip_with_content(path: &Path, content: &[u8]) {
         let file = fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         zip.start_file("pkg/bin/hello", FileOptions::<()>::default())
             .unwrap();
-        zip.write_all(b"#!/bin/sh\necho hello\n").unwrap();
+        zip.write_all(content).unwrap();
+        zip.start_file("pkg/bin/share/hello.txt", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"share").unwrap();
+        zip.start_file("pkg/bin/opt/hello.txt", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"opt").unwrap();
         zip.finish().unwrap();
     }
 
-    fn write_registry(root: &Path, archive: &Path) -> PathBuf {
+    fn write_zip(path: &Path) {
+        write_zip_with_content(path, b"#!/bin/sh\necho hello\n");
+    }
+
+    fn write_registry_version(root: &Path, archive: &Path, version: &str) -> PathBuf {
         let dir = root.join("registry/packages/hello");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -792,17 +880,31 @@ description: Hello fixture
 languages: [Shell]
 categories: [Formatter]
 source:
-  id: pkg:generic/acme/hello@1.0.0
+  id: pkg:generic/acme/hello@{version}
   asset:
     file: '{}:pkg/bin/'
 bin:
   hello: hello
+share:
+  hello-share: share
+opt:
+  hello-opt: opt
 "#,
                 archive.display()
             ),
         )
         .unwrap();
         root.join("registry")
+    }
+
+    fn write_registry(root: &Path, archive: &Path) -> PathBuf {
+        write_registry_version(root, archive, "1.0.0")
+    }
+
+    fn block_next_state_save(paths: &MasonPaths) {
+        let parent = paths.state_file.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        fs::create_dir(parent.join(format!("installed.json.tmp-{}", std::process::id()))).unwrap();
     }
 
     #[test]
@@ -824,6 +926,102 @@ bin:
         assert!(removed[0].removed);
         assert!(!paths.bin_dir.join("hello").exists());
         assert!(!paths.package_dir("hello").exists());
+    }
+
+    #[test]
+    fn update_all_skips_stale_request_after_uninstall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let archive = tmp.path().join("hello.zip");
+        write_zip(&archive);
+        let registry = write_registry(tmp.path(), &archive);
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        let installer = Installer::new(paths.clone(), Platform::new("linux", "x64", Some("gnu")));
+
+        installer
+            .install_requests(&["hello".to_owned()], None, false)
+            .unwrap();
+        let stale_update_all_requests = vec!["hello".to_owned()];
+        installer.uninstall(&["hello".to_owned()]).unwrap();
+
+        let updated = installer
+            .install_requests_for_operation(
+                "update",
+                &stale_update_all_requests,
+                None,
+                false,
+                true,
+                &NoProgressSink,
+            )
+            .unwrap();
+
+        assert!(updated.is_empty());
+        assert!(!InstalledState::load(&paths)
+            .unwrap()
+            .packages
+            .contains_key("hello"));
+        assert!(!paths.bin_dir.join("hello").exists());
+        assert!(!paths.package_dir("hello").exists());
+    }
+
+    #[test]
+    fn install_rolls_back_files_and_links_when_state_save_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let archive = tmp.path().join("hello.zip");
+        write_zip(&archive);
+        let registry = write_registry(tmp.path(), &archive);
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        block_next_state_save(&paths);
+        let installer = Installer::new(paths.clone(), Platform::new("linux", "x64", Some("gnu")));
+
+        installer
+            .install_requests(&["hello".to_owned()], None, false)
+            .unwrap_err();
+
+        assert!(!InstalledState::load(&paths)
+            .unwrap()
+            .packages
+            .contains_key("hello"));
+        assert!(!paths.package_dir("hello").exists());
+        assert!(!paths.bin_dir.join("hello").exists());
+        assert!(!paths.share_dir.join("hello-share").exists());
+        assert!(!paths.opt_dir.join("hello-opt").exists());
+    }
+
+    #[test]
+    fn update_restores_previous_install_when_state_save_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let archive_v1 = tmp.path().join("hello-v1.zip");
+        write_zip_with_content(&archive_v1, b"#!/bin/sh\necho v1\n");
+        let registry = write_registry_version(tmp.path(), &archive_v1, "1.0.0");
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        let installer = Installer::new(paths.clone(), Platform::new("linux", "x64", Some("gnu")));
+        installer
+            .install_requests(&["hello".to_owned()], None, false)
+            .unwrap();
+
+        let archive_v2 = tmp.path().join("hello-v2.zip");
+        write_zip_with_content(&archive_v2, b"#!/bin/sh\necho v2\n");
+        write_registry_version(tmp.path(), &archive_v2, "2.0.0");
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        block_next_state_save(&paths);
+
+        installer
+            .update_requests(&["hello".to_owned()], None, false)
+            .unwrap_err();
+
+        let state = InstalledState::load(&paths).unwrap();
+        assert_eq!(state.packages.get("hello").unwrap().version, "1.0.0");
+        assert_eq!(
+            fs::read_to_string(paths.package_dir("hello").join("hello")).unwrap(),
+            "#!/bin/sh\necho v1\n"
+        );
+        assert!(paths.bin_dir.join("hello").exists());
+        assert!(paths.share_dir.join("hello-share").exists());
+        assert!(paths.opt_dir.join("hello-opt").exists());
+        assert!(installer.which("hello").unwrap().path.unwrap().exists());
     }
 
     #[test]
@@ -865,7 +1063,7 @@ bin:
         let installer = Installer::new(paths, Platform::new("linux", "x64", Some("gnu")));
         let progress = NoProgressSink;
         let err = installer
-            .install_normalized_with_progress("install", package, false, &progress)
+            .install_normalized_for_request("install", package, false, false, &progress)
             .unwrap_err();
         assert!(matches!(err, M4aError::BuildScriptsDisabled { .. }));
     }
