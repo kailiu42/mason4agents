@@ -116,6 +116,26 @@ fn download_remote_to_cache_with_progress(
         ))
     })?;
     fs::create_dir_all(dir)?;
+    match fs::metadata(&dest) {
+        Ok(metadata) if metadata.is_file() => {
+            progress.event(
+                operation,
+                "download",
+                ProgressStatus::Running,
+                package,
+                "reusing cached remote source",
+            );
+            return Ok(dest);
+        }
+        Ok(_) => {
+            return Err(msg(format!(
+                "download cache destination is not a file: {}",
+                dest.display()
+            )));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("mason4agents/0.1")
@@ -145,15 +165,40 @@ fn download_remote_to_cache_with_progress(
                 reporter.emit_started();
                 let tmp = temp_cache_path(&dest, attempt)?;
                 match stream_response_to_temp_file(&mut response, &tmp, reporter) {
-                    Ok((downloaded, mut reporter)) => {
-                        if let Err(err) = fs::rename(&tmp, &dest) {
-                            cleanup_temp_file(&tmp);
-                            last_error = Some(err.into());
-                        } else {
+                    Ok((downloaded, mut reporter)) => match fs::rename(&tmp, &dest) {
+                        Ok(()) => {
                             reporter.emit_succeeded(downloaded);
                             return Ok(dest);
                         }
-                    }
+                        Err(err) => {
+                            cleanup_temp_file(&tmp);
+                            match fs::metadata(&dest) {
+                                Ok(metadata) if metadata.is_file() => {
+                                    progress.event(
+                                        operation,
+                                        "download",
+                                        ProgressStatus::Running,
+                                        package,
+                                        "reusing cached remote source",
+                                    );
+                                    reporter.emit_succeeded(downloaded);
+                                    return Ok(dest);
+                                }
+                                Ok(_) => {
+                                    last_error = Some(msg(format!(
+                                        "download cache destination is not a file: {}",
+                                        dest.display()
+                                    )));
+                                }
+                                Err(meta_err) if meta_err.kind() == io::ErrorKind::NotFound => {
+                                    last_error = Some(err.into());
+                                }
+                                Err(meta_err) => {
+                                    last_error = Some(meta_err.into());
+                                }
+                            }
+                        }
+                    },
                     Err(err) => {
                         cleanup_temp_file(&tmp);
                         last_error = Some(err);
@@ -516,8 +561,10 @@ mod tests {
     use crate::progress::{ProgressMetrics, ProgressStatus};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::Mutex;
-
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
     #[derive(Debug, Clone)]
     struct RecordedEvent {
         status: ProgressStatus,
@@ -727,5 +774,70 @@ mod tests {
         if cache_dir.exists() {
             assert!(fs::read_dir(cache_dir).expect("cache dir").next().is_none());
         }
+    }
+    #[test]
+    fn repeated_same_locator_download_reuses_existing_cache_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let downloads_dir = tmp.path().join("downloads");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let body = b"cached-once".repeat(4096);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let server = thread::spawn({
+            let body = body.clone();
+            move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("write response headers");
+                stream.write_all(&body).expect("write response body");
+                stream.flush().expect("flush response");
+            }
+        });
+
+        let locator = format!("http://{addr}/archive.zip");
+        let first_progress = CollectingSink::default();
+        let cached = download_to_cache_with_progress(
+            &locator,
+            &downloads_dir,
+            "install",
+            Some("demo"),
+            &first_progress,
+        )
+        .expect("first download cache");
+        server.join().expect("server thread");
+
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(&cached).expect("cached bytes"), body);
+
+        let second_progress = CollectingSink::default();
+        let reused = download_to_cache_with_progress(
+            &locator,
+            &downloads_dir,
+            "install",
+            Some("demo"),
+            &second_progress,
+        )
+        .expect("second download cache");
+
+        assert_eq!(reused, cached);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(fs::read(&reused).expect("reused bytes"), body);
+
+        let events = second_progress.take();
+        assert!(events.iter().any(|event| {
+            event.status == ProgressStatus::Running
+                && event.message == "reusing cached remote source"
+        }));
+        assert!(events
+            .iter()
+            .all(|event| event.metrics.downloaded_bytes.is_none()));
     }
 }
