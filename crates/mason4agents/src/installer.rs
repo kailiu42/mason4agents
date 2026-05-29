@@ -425,7 +425,14 @@ impl Installer {
                     Some(&package.name),
                     "installing package source",
                 );
-                install_source_with_progress(&self.paths, &package, &staging, operation, progress)?;
+                install_source_with_progress(
+                    &self.paths,
+                    &package,
+                    &staging,
+                    operation,
+                    allow_build_scripts,
+                    progress,
+                )?;
                 progress.event(
                     operation,
                     "source",
@@ -589,15 +596,20 @@ fn install_source_with_progress(
     package: &NormalizedPackage,
     staging: &Path,
     operation: &str,
+    allow_build_scripts: bool,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
     match package.source.source_type.as_str() {
         "github" => install_github_with_progress(paths, package, staging, operation, progress),
         "generic" => install_generic_with_progress(paths, package, staging, operation, progress),
         "openvsx" => install_openvsx_with_progress(paths, package, staging, operation, progress),
-        ty if manager::manager_for_source_type(ty).is_some() => {
-            install_with_manager_with_progress(package, staging, operation, progress)
-        }
+        ty if manager::manager_for_source_type(ty).is_some() => install_with_manager_with_progress(
+            package,
+            staging,
+            operation,
+            allow_build_scripts,
+            progress,
+        ),
         other => Err(msg(format!(
             "unsupported package source type '{other}' for {}",
             package.name
@@ -718,6 +730,7 @@ fn install_with_manager_with_progress(
     package: &NormalizedPackage,
     staging: &Path,
     operation: &str,
+    allow_build_scripts: bool,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
     progress.event(
@@ -728,7 +741,7 @@ fn install_with_manager_with_progress(
         "checking external package manager",
     );
     manager::ensure_manager(&package.source.source_type)?;
-    let spec = manager::build_install_command(&package.source, staging)?;
+    let spec = manager::build_install_command(&package.source, staging, allow_build_scripts)?;
     manager::run_install_command_with_progress(&spec, operation, Some(&package.name), progress)
 }
 
@@ -1101,8 +1114,9 @@ opt:
         };
         if !manager::command_exists("opam") {
             let progress = NoProgressSink;
-            let err = install_with_manager_with_progress(&package, &staging, "install", &progress)
-                .unwrap_err();
+            let err =
+                install_with_manager_with_progress(&package, &staging, "install", false, &progress)
+                    .unwrap_err();
             assert!(
                 matches!(err, M4aError::MissingManager { source_type, .. } if source_type == "opam")
             );

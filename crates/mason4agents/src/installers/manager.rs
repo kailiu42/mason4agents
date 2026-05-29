@@ -117,9 +117,13 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-pub fn build_install_command(source: &NormalizedSource, staging: &Path) -> Result<CommandSpec> {
+pub fn build_install_command(
+    source: &NormalizedSource,
+    staging: &Path,
+    allow_build_scripts: bool,
+) -> Result<CommandSpec> {
     let spec = match source.source_type.as_str() {
-        "npm" => npm_command(source, staging),
+        "npm" => npm_command(source, staging, allow_build_scripts),
         "pypi" => pypi_command(source, staging)?,
         "cargo" => cargo_command(source, staging),
         "golang" => golang_command(source, staging),
@@ -203,13 +207,20 @@ fn package_with_version(source: &NormalizedSource, sep: &str) -> String {
     format!("{name}{sep}{}", source.version)
 }
 
-fn npm_command(source: &NormalizedSource, staging: &Path) -> CommandSpec {
+fn npm_command(
+    source: &NormalizedSource,
+    staging: &Path,
+    allow_build_scripts: bool,
+) -> CommandSpec {
     let mut args = vec![
         "install".to_owned(),
         "--prefix".to_owned(),
         staging.display().to_string(),
-        package_with_version(source, "@"),
     ];
+    if !allow_build_scripts {
+        args.push("--ignore-scripts".to_owned());
+    }
+    args.push(package_with_version(source, "@"));
     args.extend(source.extra_packages.iter().cloned());
     CommandSpec {
         program: "npm".to_owned(),
@@ -359,15 +370,31 @@ mod tests {
     fn builds_commands_for_all_package_managers() {
         let staging = PathBuf::from("/tmp/stage");
         for ty in package_manager_types() {
-            let spec = build_install_command(&source(ty), &staging).unwrap();
+            let spec = build_install_command(&source(ty), &staging, false).unwrap();
             assert!(!spec.program.is_empty());
             assert!(!spec.args.is_empty());
         }
-        let npm = build_install_command(&source("npm"), &staging).unwrap();
+        let npm = build_install_command(&source("npm"), &staging, false).unwrap();
         assert!(npm.args.contains(&"--prefix".to_owned()));
         assert!(npm.args.iter().any(|arg| arg == "ns/pkg@1.2.3"));
         assert!(npm.args.iter().any(|arg| arg == "extra"));
-        let go = build_install_command(&source("golang"), &staging).unwrap();
+        let go = build_install_command(&source("golang"), &staging, false).unwrap();
         assert_eq!(go.env.get("GOBIN").unwrap(), "/tmp/stage/bin");
+    }
+
+    #[test]
+    fn npm_command_disables_lifecycle_scripts_by_default() {
+        let staging = PathBuf::from("/tmp/stage");
+        let spec = build_install_command(&source("npm"), &staging, false).unwrap();
+
+        assert!(spec.args.iter().any(|arg| arg == "--ignore-scripts"));
+    }
+
+    #[test]
+    fn npm_command_allows_lifecycle_scripts_when_requested() {
+        let staging = PathBuf::from("/tmp/stage");
+        let spec = build_install_command(&source("npm"), &staging, true).unwrap();
+
+        assert!(!spec.args.iter().any(|arg| arg == "--ignore-scripts"));
     }
 }
