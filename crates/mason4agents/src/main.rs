@@ -154,10 +154,16 @@ fn main() -> ExitCode {
                 eprintln!("{err}");
                 return ExitCode::SUCCESS;
             }
-            let msg = format!("{:?}", err);
             println!(
-                r#"{{"ok":false,"error":{{"code":"parse_error","message":"clap: {}"}}}}"#,
-                msg.replace('"', "\\\"")
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": false,
+                    "error": {
+                        "code": "parse_error",
+                        "message": format!("clap: {err:?}"),
+                    }
+                }))
+                .expect("serializes")
             );
             ExitCode::from(2)
         }
