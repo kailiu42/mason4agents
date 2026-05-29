@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,7 +83,7 @@ import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
-appendFileSync(process.env.M4A_NPM_LOG, \`\${process.cwd()}|\${args.join("\\u001f")}\\n\`);
+appendFileSync(process.env.M4A_NPM_LOG, \`${process.cwd()}|\${args.join("\\u001f")}\\n\`);
 
 if (args[0] === "view") {
   const spec = args[1];
@@ -234,5 +234,59 @@ describe("native npm package staging", () => {
 
     const publishArgs = loggedNpmArgs(logPath).filter((args) => args[0] === "publish");
     expect(publishArgs.map((args) => args[1]?.split("/").at(-1))).toEqual(["mason4agents"]);
+  }, 30_000);
+
+  test("rejects repo-external out dirs before deletion", () => {
+    const root = tempRoot();
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const externalBase = tempRoot();
+    const outDir = join(externalBase, "publish-out");
+    mkdirSync(outDir, { recursive: true });
+    const sentinel = join(outDir, "keep.txt");
+    writeFileSync(sentinel, "keep\n");
+
+    const result = spawnSync(process.execPath, [publishScript, "--pack", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+      cwd: root,
+      encoding: "utf8",
+      env: publishTestEnv(),
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`Refusing repo-external output directory without --allow-external-out-dir: ${outDir}`);
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  test("rejects out dirs that contain the repository root", () => {
+    const container = tempRoot();
+    const root = join(container, "repo");
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const sentinel = join(container, "keep.txt");
+    writeFileSync(sentinel, "keep\n");
+
+    const result = spawnSync(process.execPath, [publishScript, "--pack", "--root", root, "--artifacts", artifacts, "--out-dir", container], {
+      cwd: root,
+      encoding: "utf8",
+      env: publishTestEnv(),
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`Refusing unsafe output directory: ${container}`);
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  test("allows repo-external out dirs only with explicit override", () => {
+    const root = tempRoot();
+    writeRootPackage(root);
+    const artifacts = writeArtifacts(root);
+    const externalBase = tempRoot();
+    const outDir = join(externalBase, "publish-out");
+
+    const result = spawnSync(process.execPath, [publishScript, "--pack", "--allow-external-out-dir", "--root", root, "--artifacts", artifacts, "--out-dir", outDir], {
+      cwd: root,
+      encoding: "utf8",
+      env: publishTestEnv(),
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(readJson(join(outDir, "staging", "mason4agents", "package.json")).name).toBe("mason4agents");
   }, 30_000);
 });

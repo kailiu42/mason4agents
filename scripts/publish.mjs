@@ -98,7 +98,7 @@ export function main(argv, env = process.env) {
 
   const artifactDir = resolve(root, options.artifactDir);
   const outDir = resolve(root, options.outDir);
-  const staged = stagePackages({ root, pkg, artifactDir, outDir, nativePackages: selectedPackages });
+  const staged = stagePackages({ root, pkg, artifactDir, outDir, nativePackages: selectedPackages, allowExternalOutDir: options.allowExternalOutDir });
   verifyStagedPackages(staged);
 
   if (options.pack) {
@@ -160,8 +160,8 @@ export function selectNativePackages(selector = "all", allowCurrent = false) {
   return [selected];
 }
 
-export function stagePackages({ root, pkg, artifactDir, outDir, nativePackages }) {
-  assertSafeOutputDirectory(root, outDir);
+export function stagePackages({ root, pkg, artifactDir, outDir, nativePackages, allowExternalOutDir = false }) {
+  assertSafeOutputDirectory(root, outDir, allowExternalOutDir);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
@@ -381,6 +381,7 @@ function parseArgs(argv) {
     dryRun: false,
     copyLocalNative: false,
     provenance: false,
+    allowExternalOutDir: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -391,6 +392,7 @@ function parseArgs(argv) {
     else if (arg === "--root") options.root = requireValue(argv, ++index, arg);
     else if (arg === "--artifacts" || arg === "--artifact-dir") options.artifactDir = requireValue(argv, ++index, arg);
     else if (arg === "--out-dir") options.outDir = requireValue(argv, ++index, arg);
+    else if (arg === "--allow-external-out-dir") options.allowExternalOutDir = true;
     else if (arg === "--platform") options.platform = requireValue(argv, ++index, arg);
     else fail(`Unknown argument: ${arg}`);
   }
@@ -451,13 +453,18 @@ function pickDefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== undefined));
 }
 
-function assertSafeOutputDirectory(root, outDir) {
+function assertSafeOutputDirectory(root, outDir, allowExternalOutDir = false) {
   const resolvedRoot = resolve(root);
   const resolvedOut = resolve(outDir);
   const rootFromOut = relative(resolvedOut, resolvedRoot);
   const outContainsRoot = rootFromOut === "" || (!rootFromOut.startsWith("..") && !isAbsolute(rootFromOut));
+  const outFromRoot = relative(resolvedRoot, resolvedOut);
+  const outIsWithinRoot = outFromRoot !== "" && !outFromRoot.startsWith("..") && !isAbsolute(outFromRoot);
   if (resolvedOut === resolve("/") || resolvedOut.length < 8 || outContainsRoot) {
-    fail(`Refusing unsafe output directory: ${outDir}`);
+    fail(`Refusing unsafe output directory: ${resolvedOut}`);
+  }
+  if (!allowExternalOutDir && !outIsWithinRoot) {
+    fail(`Refusing repo-external output directory without --allow-external-out-dir: ${resolvedOut}`);
   }
 }
 
