@@ -130,13 +130,15 @@ fn unpack_tar<R: io::Read>(reader: R, dest: &Path, strip_prefix: Option<&str>) -
     for entry in archive.entries()? {
         let mut entry = entry?;
         let kind = entry.header().entry_type();
-        if kind.is_symlink() || kind.is_hard_link() {
+        let path = entry.path()?.to_path_buf();
+        if !kind.is_file() && !kind.is_dir() {
             return Err(M4aError::UnsafeArchiveEntry(format!(
-                "link entry {}",
-                entry.path()?.display()
+                "unsupported tar entry {} (type {:?}, byte 0x{:02x})",
+                path.display(),
+                kind,
+                kind.as_byte()
             )));
         }
-        let path = entry.path()?.to_path_buf();
         let Some(rel) = apply_strip_prefix(&path, strip_prefix)? else {
             continue;
         };
@@ -307,7 +309,35 @@ mod tests {
             tar.append(&header, io::empty()).unwrap();
             tar.finish().unwrap();
         }
-        assert!(unpack_archive(&bad_tar, &tmp.path().join("bad-tar-out"), None).is_err());
+        let err = unpack_archive(&bad_tar, &tmp.path().join("bad-tar-out"), None)
+            .expect_err("symlink tar entry must be rejected");
+        assert!(matches!(err, M4aError::UnsafeArchiveEntry(_)));
+    }
+
+    #[test]
+    fn rejects_tar_special_entries_before_unpack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tar_path = tmp.path().join("fifo.tar");
+        {
+            let file = File::create(&tar_path).unwrap();
+            let mut tar = Builder::new(file);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Fifo);
+            header.set_path("pkg/fifo").unwrap();
+            header.set_size(0);
+            header.set_cksum();
+            tar.append(&header, io::empty()).unwrap();
+            tar.finish().unwrap();
+        }
+        let out = tmp.path().join("special-out");
+        let err = unpack_archive(&tar_path, &out, Some("pkg"))
+            .expect_err("fifo tar entry must be rejected");
+        let M4aError::UnsafeArchiveEntry(message) = err else {
+            panic!("expected UnsafeArchiveEntry");
+        };
+        assert!(message.contains("pkg/fifo"));
+        assert!(message.contains("Fifo"));
+        assert!(!out.join("fifo").exists());
     }
 
     #[test]
