@@ -3,6 +3,7 @@ use crate::paths::MasonPaths;
 use crate::store::InstalledPackage;
 use crate::types::{msg, Result};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -106,7 +107,7 @@ pub fn cleanup_package_links(paths: &MasonPaths, installed: &InstalledPackage) -
         }
         #[cfg(windows)]
         {
-            let cmd_path = paths.bin_dir.join(format!("{name}.cmd"));
+            let cmd_path = windows_wrapper_path(&link_path);
             if link_belongs_to_package(&cmd_path, &package_dir) {
                 remove_path_if_exists(&cmd_path)?;
             }
@@ -236,6 +237,14 @@ fn normalize_path(path: &Path) -> PathBuf {
     }
     components.iter().collect()
 }
+pub fn windows_wrapper_path(dest: &Path) -> PathBuf {
+    let mut wrapper_name = dest
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_else(|| dest.as_os_str().to_os_string());
+    wrapper_name.push(".cmd");
+    dest.with_file_name(wrapper_name)
+}
 
 pub fn windows_cmd_wrapper(target: &Path) -> String {
     format!("@echo off\r\n\"{}\" %*\r\n", target.display())
@@ -252,7 +261,7 @@ fn replace_link(source: &Path, dest: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        fs::write(dest.with_extension("cmd"), windows_cmd_wrapper(source))?;
+        fs::write(windows_wrapper_path(dest), windows_cmd_wrapper(source))?;
     }
     Ok(())
 }
@@ -381,6 +390,22 @@ mod tests {
         assert_eq!(
             resolve_bin_source(root, "tool").unwrap(),
             PathBuf::from("/pkg/tool")
+        );
+    }
+
+    #[test]
+    fn appends_windows_wrapper_extension_for_plain_name() {
+        assert_eq!(
+            windows_wrapper_path(Path::new("bin/foo")),
+            PathBuf::from("bin/foo.cmd")
+        );
+    }
+
+    #[test]
+    fn appends_windows_wrapper_extension_for_name_with_dot() {
+        assert_eq!(
+            windows_wrapper_path(Path::new("bin/foo.bar")),
+            PathBuf::from("bin/foo.bar.cmd")
         );
     }
 

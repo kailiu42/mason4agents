@@ -1,7 +1,7 @@
 use crate::archive::{split_archive_spec, unpack_or_copy};
 use crate::download::{download_to_cache_with_progress, local_path};
 use crate::installers::{build, generic, github, manager, openvsx};
-use crate::linker::{cleanup_package_links, create_package_links};
+use crate::linker::{cleanup_package_links, create_package_links, windows_wrapper_path};
 use crate::locks::PackageLock;
 use crate::package_spec::NormalizedPackage;
 use crate::paths::MasonPaths;
@@ -28,7 +28,7 @@ fn select_executable_path(bin_dir: &Path, executable: &str, windows: bool) -> Op
         return Some(bare_path);
     }
     if windows {
-        let wrapper_path = bin_dir.join(format!("{executable}.cmd"));
+        let wrapper_path = windows_wrapper_path(&bare_path);
         if wrapper_path.exists() {
             return Some(wrapper_path);
         }
@@ -256,6 +256,7 @@ impl Installer {
             let _state_lock = acquire_state_lock(&self.paths)?;
             let mut state = InstalledState::load(&self.paths)?;
             let mut out = Vec::new();
+            let mut pending_removals = Vec::new();
             for package in packages {
                 validate_package_name(package)?;
                 let _lock = PackageLock::acquire(&self.paths, package)?;
@@ -265,19 +266,32 @@ impl Installer {
                         "remove",
                         ProgressStatus::Running,
                         Some(package),
-                        "removing package links and files",
+                        "staging package removal",
                     );
-                    cleanup_package_links(&self.paths, &installed)?;
                     let dir = self.paths.package_dir(package);
-                    if dir.exists() {
-                        fs::remove_dir_all(dir)?;
+                    let old_dir = self.paths.package_old_dir(package);
+                    remove_dir_if_exists(&old_dir)?;
+                    cleanup_package_links(&self.paths, &installed)?;
+                    if let Err(err) = stage_package_dir_for_uninstall(&dir, &old_dir) {
+                        if let Err(rollback_err) =
+                            rollback_staged_uninstall(&self.paths, &installed, &dir, &old_dir)
+                        {
+                            return Err(msg(format!(
+                                "failed to stage uninstall for {package} ({err}); rollback failed: {rollback_err}"
+                            )));
+                        }
+                        return Err(err);
                     }
+                    pending_removals.push(PendingUninstall {
+                        installed: installed.clone(),
+                        old_dir,
+                    });
                     progress.event(
                         "uninstall",
                         "remove",
                         ProgressStatus::Succeeded,
                         Some(package),
-                        "package removed",
+                        "package removal staged",
                     );
                     out.push(UninstallResult {
                         package: package.clone(),
@@ -304,7 +318,17 @@ impl Installer {
                 None,
                 "writing install state",
             );
-            state.save(&self.paths)?;
+            if let Err(err) = state.save(&self.paths) {
+                if let Err(rollback_err) =
+                    rollback_pending_uninstalls(&self.paths, &pending_removals)
+                {
+                    return Err(msg(format!(
+                        "failed to save uninstall state ({err}); rollback failed: {rollback_err}"
+                    )));
+                }
+                return Err(err);
+            }
+            finalize_pending_uninstalls(&pending_removals)?;
             drop(_state_lock);
             Ok(out)
         })();
@@ -397,19 +421,19 @@ impl Installer {
             );
             let _state_lock = acquire_state_lock(&self.paths)?;
             let _lock = PackageLock::acquire(&self.paths, &package.name)?;
-            if skip_missing_installed {
-                let state = InstalledState::load(&self.paths)?;
-                if !state.packages.contains_key(&package.name) {
-                    progress.event(
-                        operation,
-                        "package",
-                        ProgressStatus::Succeeded,
-                        Some(&package.name),
-                        "package is no longer installed; skipping update",
-                    );
-                    return Ok(None);
-                }
+            let mut state = InstalledState::load(&self.paths)?;
+            if skip_missing_installed && !state.packages.contains_key(&package.name) {
+                progress.event(
+                    operation,
+                    "package",
+                    ProgressStatus::Succeeded,
+                    Some(&package.name),
+                    "package is no longer installed; skipping update",
+                );
+                return Ok(None);
             }
+            ensure_no_link_ownership_conflicts(&package, &state)?;
+            let previous_receipt = state.packages.get(&package.name).cloned();
             let staging = self.paths.package_tmp_dir(&package.name);
             let final_dir = self.paths.package_dir(&package.name);
             let old_dir = self.paths.package_old_dir(&package.name);
@@ -479,10 +503,8 @@ impl Installer {
                 return Err(err.into());
             }
 
-            let mut state = InstalledState::load(&self.paths)?;
             // Capture previous receipt data before cleaning links, so we can
             // recreate them on rollback if link creation fails.
-            let previous_receipt = state.packages.get(&package.name).cloned();
             if let Some(previous) = &previous_receipt {
                 progress.event(
                     operation,
@@ -622,6 +644,58 @@ fn install_source_with_progress(
         ))),
     }
 }
+fn asset_file_specs<'a>(package: &'a NormalizedPackage, source_type: &str) -> Result<Vec<&'a str>> {
+    let asset = package.source.asset.as_ref().ok_or_else(|| {
+        msg(format!(
+            "{source_type} package {} has no selected asset",
+            package.name
+        ))
+    })?;
+    let file_spec = asset.file.as_deref().ok_or_else(|| {
+        msg(format!(
+            "{source_type} package {} selected asset has no file",
+            package.name
+        ))
+    })?;
+    let mut files = Vec::with_capacity(1 + asset.extra_files.len());
+    files.push(file_spec);
+    files.extend(asset.extra_files.iter().map(String::as_str));
+    Ok(files)
+}
+
+fn install_asset_file_specs_with_progress<F>(
+    paths: &MasonPaths,
+    package: &NormalizedPackage,
+    staging: &Path,
+    operation: &str,
+    progress: &dyn ProgressSink,
+    source_type: &str,
+    mut resolve_locator: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    for file_spec in asset_file_specs(package, source_type)? {
+        let (file, strip_prefix) = split_archive_spec(file_spec);
+        let locator = resolve_locator(file)?;
+        let downloaded = download_to_cache_with_progress(
+            &locator,
+            &paths.downloads_dir,
+            operation,
+            Some(&package.name),
+            progress,
+        )?;
+        unpack_or_copy_with_progress(
+            &downloaded,
+            staging,
+            strip_prefix,
+            operation,
+            Some(&package.name),
+            progress,
+        )?;
+    }
+    Ok(())
+}
 
 fn install_github_with_progress(
     paths: &MasonPaths,
@@ -630,42 +704,24 @@ fn install_github_with_progress(
     operation: &str,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
-    let asset = package.source.asset.as_ref().ok_or_else(|| {
-        msg(format!(
-            "github package {} has no selected asset",
-            package.name
-        ))
-    })?;
-    let file_spec = asset.file.as_deref().ok_or_else(|| {
-        msg(format!(
-            "github package {} selected asset has no file",
-            package.name
-        ))
-    })?;
-    let (file, strip_prefix) = split_archive_spec(file_spec);
-    let locator = if local_path(file).is_some()
-        || file.starts_with("file://")
-        || file.starts_with("http://")
-        || file.starts_with("https://")
-    {
-        file.to_owned()
-    } else {
-        github::release_asset_url(&package.source, file)?
-    };
-    let downloaded = download_to_cache_with_progress(
-        &locator,
-        &paths.downloads_dir,
-        operation,
-        Some(&package.name),
-        progress,
-    )?;
-    unpack_or_copy_with_progress(
-        &downloaded,
+    install_asset_file_specs_with_progress(
+        paths,
+        package,
         staging,
-        strip_prefix,
         operation,
-        Some(&package.name),
         progress,
+        "github",
+        |file| {
+            if local_path(file).is_some()
+                || file.starts_with("file://")
+                || file.starts_with("http://")
+                || file.starts_with("https://")
+            {
+                Ok(file.to_owned())
+            } else {
+                github::release_asset_url(&package.source, file)
+            }
+        },
     )
 }
 
@@ -676,12 +732,24 @@ fn install_generic_with_progress(
     operation: &str,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
-    let file = package
+    let has_asset_files = package
         .source
         .asset
         .as_ref()
-        .and_then(|a| a.file.as_deref());
-    let locator = generic::asset_locator(&package.source, file)?;
+        .map(|asset| asset.file.is_some() || !asset.extra_files.is_empty())
+        .unwrap_or(false);
+    if has_asset_files {
+        return install_asset_file_specs_with_progress(
+            paths,
+            package,
+            staging,
+            operation,
+            progress,
+            "generic",
+            |file| Ok(file.to_owned()),
+        );
+    }
+    let locator = generic::asset_locator(&package.source, None)?;
     let (locator, strip_prefix) = split_archive_spec(&locator);
     let downloaded = download_to_cache_with_progress(
         locator,
@@ -707,13 +775,24 @@ fn install_openvsx_with_progress(
     operation: &str,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
-    let locator = package
+    let has_asset_files = package
         .source
         .asset
         .as_ref()
-        .and_then(|a| a.file.as_deref())
-        .map(str::to_owned)
-        .unwrap_or(openvsx::vsix_url(&package.source)?);
+        .map(|asset| asset.file.is_some() || !asset.extra_files.is_empty())
+        .unwrap_or(false);
+    if has_asset_files {
+        return install_asset_file_specs_with_progress(
+            paths,
+            package,
+            staging,
+            operation,
+            progress,
+            "openvsx",
+            |file| Ok(file.to_owned()),
+        );
+    }
+    let locator = openvsx::vsix_url(&package.source)?;
     let (locator, strip_prefix) = split_archive_spec(&locator);
     let downloaded = download_to_cache_with_progress(
         locator,
@@ -787,7 +866,107 @@ fn remove_dir_if_exists(path: &Path) -> Result<()> {
         Err(err) => Err(err.into()),
     }
 }
+struct PendingUninstall {
+    installed: InstalledPackage,
+    old_dir: PathBuf,
+}
 
+fn stage_package_dir_for_uninstall(dir: &Path, old_dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    fs::rename(dir, old_dir)?;
+    Ok(())
+}
+
+fn rollback_staged_uninstall(
+    paths: &MasonPaths,
+    installed: &InstalledPackage,
+    dir: &Path,
+    old_dir: &Path,
+) -> Result<()> {
+    if old_dir.exists() {
+        if dir.exists() {
+            remove_dir_if_exists(dir)?;
+        }
+        fs::rename(old_dir, dir)?;
+    }
+    if dir.exists() {
+        create_package_links(
+            paths,
+            &installed.name,
+            dir,
+            &installed.bins,
+            &installed.share,
+            &installed.opt,
+        )?;
+    }
+    Ok(())
+}
+
+fn rollback_pending_uninstalls(paths: &MasonPaths, pending: &[PendingUninstall]) -> Result<()> {
+    for removal in pending.iter().rev() {
+        let dir = paths.package_dir(&removal.installed.name);
+        rollback_staged_uninstall(paths, &removal.installed, &dir, &removal.old_dir)?;
+    }
+    Ok(())
+}
+
+fn finalize_pending_uninstalls(pending: &[PendingUninstall]) -> Result<()> {
+    for removal in pending {
+        remove_dir_if_exists(&removal.old_dir)?;
+    }
+    Ok(())
+}
+
+fn ensure_no_link_ownership_conflicts(
+    package: &NormalizedPackage,
+    state: &InstalledState,
+) -> Result<()> {
+    let mut conflicts = Vec::new();
+    collect_link_ownership_conflicts("bin", &package.bins, &package.name, state, &mut conflicts);
+    collect_link_ownership_conflicts(
+        "share",
+        &package.share,
+        &package.name,
+        state,
+        &mut conflicts,
+    );
+    collect_link_ownership_conflicts("opt", &package.opt, &package.name, state, &mut conflicts);
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    Err(msg(format!(
+        "cannot install package '{}': link name conflicts with installed package(s): {}. Uninstall the owning package or remove the conflicting link name before retrying.",
+        package.name,
+        conflicts.join(", ")
+    )))
+}
+
+fn collect_link_ownership_conflicts(
+    kind: &str,
+    requested: &BTreeMap<String, String>,
+    package_name: &str,
+    state: &InstalledState,
+    conflicts: &mut Vec<String>,
+) {
+    for (owner_name, installed) in &state.packages {
+        if owner_name == package_name {
+            continue;
+        }
+        for name in requested.keys() {
+            let owned = match kind {
+                "bin" => installed.bins.contains_key(name),
+                "share" => installed.share.contains_key(name),
+                "opt" => installed.opt.contains_key(name),
+                _ => unreachable!(),
+            };
+            if owned {
+                conflicts.push(format!("{kind} '{name}' is owned by '{owner_name}'"));
+            }
+        }
+    }
+}
 fn rollback_committed_install(
     paths: &MasonPaths,
     installed: &InstalledPackage,
@@ -829,7 +1008,6 @@ pub(crate) fn validate_package_name(name: &str) -> Result<()> {
             "package name '{name}' must not contain path separators"
         )));
     }
-    // Reject any path segment that is `.` or `..`
     for segment in name.split('/') {
         if segment == "." || segment == ".." {
             return Err(msg(format!(
@@ -888,6 +1066,71 @@ mod tests {
         write_zip_with_content(path, b"#!/bin/sh\necho hello\n");
     }
 
+    fn write_share_zip(path: &Path) {
+        let file = fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("runtime/share/hello.txt", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"extra-share").unwrap();
+        zip.finish().unwrap();
+    }
+
+    fn write_registry_package_version(
+        root: &Path,
+        package_name: &str,
+        archive: &Path,
+        version: &str,
+        bin_name: &str,
+        share_name: &str,
+        opt_name: &str,
+    ) -> PathBuf {
+        let dir = root.join("registry/packages").join(package_name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.yaml"),
+            format!(
+                r#"
+name: {package_name}
+description: {package_name} fixture
+languages: [Shell]
+categories: [Formatter]
+source:
+  id: pkg:generic/acme/{package_name}@{version}
+  asset:
+    file: '{}:pkg/bin/'
+bin:
+  {bin_name}: hello
+share:
+  {share_name}: share
+opt:
+  {opt_name}: opt
+"#,
+                archive.display()
+            ),
+        )
+        .unwrap();
+        root.join("registry")
+    }
+
+    fn write_registry_version(root: &Path, archive: &Path, version: &str) -> PathBuf {
+        write_registry_package_version(
+            root,
+            "hello",
+            archive,
+            version,
+            "hello",
+            "hello-share",
+            "hello-opt",
+        )
+    }
+
+    fn write_registry(root: &Path, archive: &Path) -> PathBuf {
+        write_registry_version(root, archive, "1.0.0")
+    }
+
+    fn block_next_state_save(paths: &MasonPaths) {
+        fail_next_state_save_for_test(&paths.state_file);
+    }
     #[test]
     fn select_executable_path_prefers_bare_on_windows() {
         let tmp = tempfile::tempdir().unwrap();
@@ -898,6 +1141,21 @@ mod tests {
         fs::write(&wrapper, b"wrapper").unwrap();
 
         assert_eq!(select_executable_path(bin_dir, "tool", true), Some(bare));
+    }
+
+    #[test]
+    fn select_executable_path_uses_windows_cmd_wrapper_fallback_for_dotted_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path();
+        let wrapper = bin_dir.join("tool.cmd");
+        let dotted_wrapper = bin_dir.join("tool.exe.cmd");
+        fs::write(&wrapper, b"wrong-wrapper").unwrap();
+        fs::write(&dotted_wrapper, b"wrapper").unwrap();
+
+        assert_eq!(
+            select_executable_path(bin_dir, "tool.exe", true),
+            Some(dotted_wrapper)
+        );
     }
 
     #[test]
@@ -920,6 +1178,34 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_restores_files_and_links_when_state_save_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let archive = tmp.path().join("hello.zip");
+        write_zip(&archive);
+        let registry = write_registry(tmp.path(), &archive);
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        let installer = Installer::new(paths.clone(), Platform::new("linux", "x64", Some("gnu")));
+        installer
+            .install_requests(&["hello".to_owned()], None, false)
+            .unwrap();
+        block_next_state_save(&paths);
+
+        installer.uninstall(&["hello".to_owned()]).unwrap_err();
+
+        let state = InstalledState::load(&paths).unwrap();
+        assert_eq!(state.packages.get("hello").unwrap().version, "1.0.0");
+        assert_eq!(
+            fs::read_to_string(paths.package_dir("hello").join("hello")).unwrap(),
+            "#!/bin/sh\necho hello\n"
+        );
+        assert!(paths.bin_dir.join("hello").exists());
+        assert!(paths.share_dir.join("hello-share").exists());
+        assert!(paths.opt_dir.join("hello-opt").exists());
+        assert!(installer.which("hello").unwrap().path.unwrap().exists());
+    }
+
+    #[test]
     fn which_returns_windows_cmd_wrapper_when_bare_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
@@ -935,13 +1221,32 @@ mod tests {
     }
 
     #[test]
+    fn which_returns_windows_cmd_wrapper_for_dotted_name_when_bare_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure_base_dirs().unwrap();
+        let wrapper = paths.bin_dir.join("tool.exe.cmd");
+        fs::write(&wrapper, b"wrapper").unwrap();
+        let installer = Installer::new(paths, Platform::new("win", "x64", None));
+
+        let result = installer.which("tool.exe").unwrap();
+
+        assert_eq!(result.path, Some(wrapper));
+        assert_eq!(result.package, None);
+    }
+
+    #[test]
     fn select_executable_path_returns_none_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
 
         assert_eq!(select_executable_path(tmp.path(), "tool", true), None);
     }
 
-    fn write_registry_version(root: &Path, archive: &Path, version: &str) -> PathBuf {
+    fn write_multi_asset_registry(
+        root: &Path,
+        binary_archive: &Path,
+        share_archive: &Path,
+    ) -> PathBuf {
         let dir = root.join("registry/packages/hello");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -953,29 +1258,22 @@ description: Hello fixture
 languages: [Shell]
 categories: [Formatter]
 source:
-  id: pkg:generic/acme/hello@{version}
+  id: pkg:generic/acme/hello@1.0.0
   asset:
-    file: '{}:pkg/bin/'
+    file:
+      - '{}:pkg/bin/'
+      - '{}:runtime/'
 bin:
   hello: hello
 share:
   hello-share: share
-opt:
-  hello-opt: opt
 "#,
-                archive.display()
+                binary_archive.display(),
+                share_archive.display()
             ),
         )
         .unwrap();
         root.join("registry")
-    }
-
-    fn write_registry(root: &Path, archive: &Path) -> PathBuf {
-        write_registry_version(root, archive, "1.0.0")
-    }
-
-    fn block_next_state_save(paths: &MasonPaths) {
-        fail_next_state_save_for_test(&paths.state_file);
     }
 
     #[test]
@@ -997,6 +1295,34 @@ opt:
         assert!(removed[0].removed);
         assert!(!paths.bin_dir.join("hello").exists());
         assert!(!paths.package_dir("hello").exists());
+    }
+
+    #[test]
+    fn installs_all_asset_files_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let binary_archive = tmp.path().join("hello-bin.zip");
+        write_zip(&binary_archive);
+        let share_archive = tmp.path().join("hello-share.zip");
+        write_share_zip(&share_archive);
+        let registry = write_multi_asset_registry(tmp.path(), &binary_archive, &share_archive);
+        refresh_registry(&paths, Some(registry.to_str().unwrap())).unwrap();
+        let installer = Installer::new(paths.clone(), Platform::new("linux", "x64", Some("gnu")));
+
+        installer
+            .install_requests(&["hello".to_owned()], None, false)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(paths.package_dir("hello").join("hello")).unwrap(),
+            "#!/bin/sh\necho hello\n"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.package_dir("hello").join("share/hello.txt")).unwrap(),
+            "extra-share"
+        );
+        assert!(paths.bin_dir.join("hello").exists());
+        assert!(paths.share_dir.join("hello-share").exists());
     }
 
     #[test]
