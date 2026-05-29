@@ -845,6 +845,7 @@ mod tests {
     use super::*;
     use crate::package_spec::{AssetSpec, NormalizedSource};
     use crate::registry::refresh_registry;
+    use crate::store::fail_next_state_save_for_test;
     use std::collections::HashMap;
     use std::ffi::OsString;
     use std::io::Write;
@@ -974,9 +975,7 @@ opt:
     }
 
     fn block_next_state_save(paths: &MasonPaths) {
-        let parent = paths.state_file.parent().unwrap();
-        fs::create_dir_all(parent).unwrap();
-        fs::create_dir(parent.join(format!("installed.json.tmp-{}", std::process::id()))).unwrap();
+        fail_next_state_save_for_test(&paths.state_file);
     }
 
     #[test]
