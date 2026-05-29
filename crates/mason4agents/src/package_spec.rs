@@ -156,7 +156,8 @@ impl RawPackageSpec {
         let download = selected_source
             .download
             .as_ref()
-            .and_then(|raw| select_download_entry(raw, platform).ok())
+            .map(|raw| select_download_entry(raw, platform, &self.name))
+            .transpose()?
             .flatten();
         let build_scripts = extract_build_scripts(&selected_source.build, platform);
         // Build initial context (without source.build) to render the build spec itself.
@@ -405,7 +406,7 @@ fn select_asset(
                 };
                 if item_targets
                     .iter()
-                    .any(|t| candidates.contains(&t.to_string()))
+                    .any(|target| candidates.iter().any(|candidate| candidate == target))
                 {
                     matched_item = Some(item.clone());
                     break;
@@ -421,11 +422,48 @@ fn select_asset(
                 }
             }
         }
-        Value::Object(_) => json_value,
+        Value::Object(map) => {
+            if let Some(targets) = parse_asset_targets(package, map.get("target"))? {
+                let candidates = platform.candidates();
+                if !targets
+                    .iter()
+                    .any(|target| candidates.iter().any(|candidate| candidate == target))
+                {
+                    return Err(M4aError::UnsupportedTarget {
+                        package: package.to_owned(),
+                        targets,
+                    });
+                }
+            }
+            Value::Object(map)
+        }
         Value::Null => return Ok(None),
         _ => return Err(msg(format!("invalid source.asset for package {package}"))),
     };
     asset_from_json(selected, version, source_id).map(Some)
+}
+
+fn parse_asset_targets(package: &str, value: Option<&Value>) -> Result<Option<Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        Value::String(target) => Ok(Some(vec![target.clone()])),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_owned).ok_or_else(|| {
+                    msg(format!(
+                        "invalid source.asset.target for package {package}; expected string or array of strings"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<String>>>()
+            .map(Some),
+        _ => Err(msg(format!(
+            "invalid source.asset.target for package {package}; expected string or array of strings"
+        ))),
+    }
 }
 
 fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<AssetSpec> {
@@ -496,6 +534,7 @@ fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<Asset
 fn select_download_entry(
     raw: &serde_yaml::Value,
     platform: &Platform,
+    package: &str,
 ) -> Result<Option<DownloadEntry>> {
     // null → None
     if raw.is_null() {
@@ -540,7 +579,7 @@ fn select_download_entry(
     }
     let Some((matched_target, item)) = platform.select(&targets) else {
         return Err(M4aError::UnsupportedTarget {
-            package: String::new(),
+            package: package.to_owned(),
             targets: targets.keys().cloned().collect(),
         });
     };
@@ -735,6 +774,117 @@ neovim:
             .normalize(&Platform::new("win", "x64", None), None)
             .unwrap_err();
         assert!(matches!(err, M4aError::UnsupportedTarget { .. }));
+    }
+
+    #[test]
+    fn accepts_object_asset_with_matching_target() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    target: linux_x64_gnu
+    file: demo.zip
+    bin: demo
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(
+            pkg.source.asset.as_ref().unwrap().file.as_deref(),
+            Some("demo.zip")
+        );
+    }
+
+    #[test]
+    fn rejects_object_asset_with_mismatched_target() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    target: win_x64
+    file: demo.zip
+"#,
+        )
+        .unwrap();
+        let err = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            M4aError::UnsupportedTarget { package, targets }
+                if package == "demo" && targets == vec!["win_x64".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn accepts_object_asset_without_target() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    file: demo.zip
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(
+            pkg.source.asset.as_ref().unwrap().file.as_deref(),
+            Some("demo.zip")
+        );
+    }
+
+    #[test]
+    fn propagates_unsupported_download_targets() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:generic/acme/demo@1.0.0
+  download:
+    - target: darwin_arm64
+      file: demo-macos.tar.gz
+"#,
+        )
+        .unwrap();
+        let err = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            M4aError::UnsupportedTarget { package, targets }
+                if package == "demo" && targets == vec!["darwin_arm64".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn propagates_malformed_download_specs() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:generic/acme/demo@1.0.0
+  download:
+    - target: linux_x64_gnu
+"#,
+        )
+        .unwrap();
+        let err = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "download entry missing 'file' or 'url' field"
+        );
     }
 
     #[test]
