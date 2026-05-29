@@ -1,11 +1,11 @@
 use crate::progress::{emit_error, NoProgressSink, ProgressMetrics, ProgressSink, ProgressStatus};
-use crate::types::{msg, Result};
+use crate::types::{msg, M4aError, Result};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const DOWNLOAD_PROGRESS_STEP_BYTES: u64 = 64 * 1024;
@@ -39,34 +39,7 @@ pub fn download_to_cache_with_progress(
             fs::copy(path, &dest)?;
             return Ok(dest);
         }
-        let bytes = fetch_bytes_with_progress(locator, operation, package, progress)?;
-        progress.event(
-            operation,
-            "download",
-            ProgressStatus::Running,
-            package,
-            "writing download cache",
-        );
-        let digest = hex::encode(Sha256::digest(locator.as_bytes()));
-        let dir = downloads_dir.join(&digest[..16]);
-        fs::create_dir_all(&dir)?;
-        let clean_locator = locator
-            .split('?')
-            .next()
-            .unwrap_or(locator)
-            .split('#')
-            .next()
-            .unwrap_or(locator);
-        let filename = clean_locator
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_owned())
-            .unwrap_or_else(|| hex::encode(Sha256::digest(locator.as_bytes())));
-        let dest = dir.join(filename);
-        let mut file = fs::File::create(&dest)?;
-        file.write_all(&bytes)?;
-        Ok(dest)
+        download_remote_to_cache_with_progress(locator, downloads_dir, operation, package, progress)
     })();
     match &result {
         Ok(_) => progress.event(
@@ -79,6 +52,156 @@ pub fn download_to_cache_with_progress(
         Err(err) => emit_error(progress, operation, "download", package, err),
     }
     result
+}
+
+fn remote_cache_path(locator: &str, downloads_dir: &Path) -> Result<PathBuf> {
+    let digest = hex::encode(Sha256::digest(locator.as_bytes()));
+    let dir = downloads_dir.join(&digest[..16]);
+    let clean_locator = locator
+        .split('?')
+        .next()
+        .unwrap_or(locator)
+        .split('#')
+        .next()
+        .unwrap_or(locator);
+    let filename = clean_locator
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| hex::encode(Sha256::digest(locator.as_bytes())));
+    Ok(dir.join(filename))
+}
+
+fn temp_cache_path(dest: &Path, attempt: usize) -> Result<PathBuf> {
+    let filename = dest
+        .file_name()
+        .ok_or_else(|| {
+            msg(format!(
+                "download cache path has no filename: {}",
+                dest.display()
+            ))
+        })?
+        .to_string_lossy();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(dest.with_file_name(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        nonce + attempt as u128,
+    )))
+}
+
+fn download_remote_to_cache_with_progress(
+    locator: &str,
+    downloads_dir: &Path,
+    operation: &str,
+    package: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<PathBuf> {
+    progress.event(
+        operation,
+        "download",
+        ProgressStatus::Started,
+        package,
+        "fetching remote source",
+    );
+    let dest = remote_cache_path(locator, downloads_dir)?;
+    let dir = dest.parent().ok_or_else(|| {
+        msg(format!(
+            "download cache path has no parent: {}",
+            dest.display()
+        ))
+    })?;
+    fs::create_dir_all(dir)?;
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("mason4agents/0.1")
+        .build()?;
+    let mut last_error: Option<M4aError> = None;
+    for attempt in 0..3 {
+        let message = format!("download attempt {}/3", attempt + 1);
+        progress.event(
+            operation,
+            "download",
+            ProgressStatus::Running,
+            package,
+            &message,
+        );
+        match client
+            .get(locator)
+            .send()
+            .and_then(|response| response.error_for_status())
+        {
+            Ok(mut response) => {
+                let reporter = DownloadProgressReporter::new(
+                    operation,
+                    package,
+                    progress,
+                    response.content_length(),
+                );
+                reporter.emit_started();
+                let tmp = temp_cache_path(&dest, attempt)?;
+                match stream_response_to_temp_file(&mut response, &tmp, reporter) {
+                    Ok((downloaded, mut reporter)) => {
+                        if let Err(err) = fs::rename(&tmp, &dest) {
+                            cleanup_temp_file(&tmp);
+                            last_error = Some(err.into());
+                        } else {
+                            reporter.emit_succeeded(downloaded);
+                            return Ok(dest);
+                        }
+                    }
+                    Err(err) => {
+                        cleanup_temp_file(&tmp);
+                        last_error = Some(err);
+                    }
+                }
+            }
+            Err(err) => {
+                last_error = Some(err.into());
+            }
+        }
+        if attempt < 2 {
+            progress.event(
+                operation,
+                "download",
+                ProgressStatus::Running,
+                package,
+                "download attempt failed; retrying",
+            );
+            let attempt_delay = u64::try_from(attempt + 1).expect("small retry count");
+            thread::sleep(Duration::from_millis(150 * attempt_delay));
+        }
+    }
+    let err = last_error.expect("loop attempted at least once");
+    Err(err)
+}
+
+fn stream_response_to_temp_file<'a>(
+    response: &mut reqwest::blocking::Response,
+    tmp: &Path,
+    reporter: DownloadProgressReporter<'a>,
+) -> Result<(u64, DownloadProgressReporter<'a>)> {
+    let file = OpenOptions::new().write(true).create_new(true).open(tmp)?;
+    let mut download = DownloadFile {
+        file,
+        downloaded: 0,
+        reporter,
+    };
+    io::copy(response, &mut download)?;
+    download.file.flush()?;
+    Ok((download.downloaded, download.reporter))
+}
+
+fn cleanup_temp_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
 }
 
 pub fn fetch_bytes(locator: &str) -> Result<Vec<u8>> {
@@ -213,6 +336,25 @@ impl Write for DownloadBuffer<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+struct DownloadFile<'a> {
+    file: fs::File,
+    downloaded: u64,
+    reporter: DownloadProgressReporter<'a>,
+}
+
+impl Write for DownloadFile<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.file.write(buf)?;
+        self.downloaded += u64::try_from(written).expect("written length fits into u64");
+        self.reporter.maybe_emit(self.downloaded);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -480,5 +622,110 @@ mod tests {
         );
         assert!(final_event.message.contains("100.0%"));
         assert!(final_event.message.contains("/s"));
+    }
+
+    #[test]
+    fn download_to_cache_streams_remote_body_to_final_file_with_progress() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let downloads_dir = tmp.path().join("downloads");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let body_chunks = [
+            b"abcd".repeat(16 * 1024),
+            b"efgh".repeat(16 * 1024),
+            b"ijkl".repeat(16 * 1024),
+        ];
+        let expected = body_chunks.concat();
+        let total_bytes = expected.len();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {total_bytes}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write response headers");
+            stream.flush().expect("flush response headers");
+            for chunk in body_chunks {
+                stream.write_all(&chunk).expect("write response chunk");
+                stream.flush().expect("flush response chunk");
+            }
+        });
+
+        let progress = CollectingSink::default();
+        let locator = format!("http://{addr}/archive.zip");
+        let cached = download_to_cache_with_progress(
+            &locator,
+            &downloads_dir,
+            "install",
+            Some("demo"),
+            &progress,
+        )
+        .expect("download cache");
+        server.join().expect("server thread");
+
+        assert_eq!(fs::read(&cached).expect("cached bytes"), expected);
+        assert_eq!(cached, remote_cache_path(&locator, &downloads_dir).unwrap());
+        assert!(!fs::read_dir(cached.parent().expect("cache parent"))
+            .expect("cache dir")
+            .any(|entry| entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+
+        let events = progress.take();
+        let final_event = events
+            .iter()
+            .rev()
+            .find(|event| event.metrics.downloaded_bytes.is_some())
+            .expect("final metric event");
+        assert_eq!(final_event.status, ProgressStatus::Succeeded);
+        assert_eq!(
+            final_event.metrics.downloaded_bytes,
+            Some(total_bytes as u64)
+        );
+        assert_eq!(final_event.metrics.total_bytes, Some(total_bytes as u64));
+    }
+
+    #[test]
+    fn failed_download_to_cache_removes_temp_file_and_does_not_create_final_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let downloads_dir = tmp.path().join("downloads");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\nshort",
+                    )
+                    .expect("write short response");
+                stream.flush().expect("flush short response");
+            }
+        });
+
+        let progress = CollectingSink::default();
+        let locator = format!("http://{addr}/broken.zip");
+        let dest = remote_cache_path(&locator, &downloads_dir).expect("cache path");
+        let result = download_to_cache_with_progress(
+            &locator,
+            &downloads_dir,
+            "install",
+            Some("demo"),
+            &progress,
+        );
+        server.join().expect("server thread");
+
+        assert!(result.is_err());
+        assert!(!dest.exists());
+        let cache_dir = dest.parent().expect("cache parent");
+        if cache_dir.exists() {
+            assert!(fs::read_dir(cache_dir).expect("cache dir").next().is_none());
+        }
     }
 }
