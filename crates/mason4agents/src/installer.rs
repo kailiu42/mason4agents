@@ -22,6 +22,20 @@ fn acquire_state_lock(paths: &MasonPaths) -> Result<PackageLock> {
     PackageLock::acquire(paths, STATE_LOCK)
 }
 
+fn select_executable_path(bin_dir: &Path, executable: &str, windows: bool) -> Option<PathBuf> {
+    let bare_path = bin_dir.join(executable);
+    if bare_path.exists() {
+        return Some(bare_path);
+    }
+    if windows {
+        let wrapper_path = bin_dir.join(format!("{executable}.cmd"));
+        if wrapper_path.exists() {
+            return Some(wrapper_path);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallResult {
     pub package: String,
@@ -319,16 +333,8 @@ impl Installer {
                 "executable name '{executable}' must not contain path separators"
             )));
         }
-        let bare_path = self.paths.bin_dir.join(executable);
-        let exists = bare_path.exists();
-        #[cfg(windows)]
-        let exists = exists
-            || self
-                .paths
-                .bin_dir
-                .join(format!("{executable}.cmd"))
-                .exists();
-        let path = if exists { Some(bare_path) } else { None };
+        let path =
+            select_executable_path(&self.paths.bin_dir, executable, self.platform.os == "win");
         let state = InstalledState::load(&self.paths)?;
         let package = state
             .packages
@@ -879,6 +885,59 @@ mod tests {
 
     fn write_zip(path: &Path) {
         write_zip_with_content(path, b"#!/bin/sh\necho hello\n");
+    }
+
+    #[test]
+    fn select_executable_path_prefers_bare_on_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path();
+        let bare = bin_dir.join("tool");
+        let wrapper = bin_dir.join("tool.cmd");
+        fs::write(&bare, b"bare").unwrap();
+        fs::write(&wrapper, b"wrapper").unwrap();
+
+        assert_eq!(select_executable_path(bin_dir, "tool", true), Some(bare));
+    }
+
+    #[test]
+    fn select_executable_path_uses_windows_cmd_wrapper_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path();
+        let wrapper = bin_dir.join("tool.cmd");
+        fs::write(&wrapper, b"wrapper").unwrap();
+
+        assert_eq!(select_executable_path(bin_dir, "tool", true), Some(wrapper));
+    }
+
+    #[test]
+    fn select_executable_path_ignores_cmd_wrapper_off_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path();
+        fs::write(bin_dir.join("tool.cmd"), b"wrapper").unwrap();
+
+        assert_eq!(select_executable_path(bin_dir, "tool", false), None);
+    }
+
+    #[test]
+    fn which_returns_windows_cmd_wrapper_when_bare_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        paths.ensure_base_dirs().unwrap();
+        let wrapper = paths.bin_dir.join("tool.cmd");
+        fs::write(&wrapper, b"wrapper").unwrap();
+        let installer = Installer::new(paths, Platform::new("win", "x64", None));
+
+        let result = installer.which("tool").unwrap();
+
+        assert_eq!(result.path, Some(wrapper));
+        assert_eq!(result.package, None);
+    }
+
+    #[test]
+    fn select_executable_path_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        assert_eq!(select_executable_path(tmp.path(), "tool", true), None);
     }
 
     fn write_registry_version(root: &Path, archive: &Path, version: &str) -> PathBuf {
