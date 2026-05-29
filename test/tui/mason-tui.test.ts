@@ -127,6 +127,30 @@ describe("Mason TUI core", () => {
     expect(continuation!.indexOf("description column without")).toBeGreaterThan(2);
   });
 
+  test("uses requested installed table column widths", () => {
+    const timestamp = "2026-05-24T12:34:56.789123Z";
+    const model = modelForResult("installed", [
+      {
+        name: "lua-language-server",
+        version: "v3.8.0",
+        bins: { lua_ls: "bin/lua-language-server" },
+        installed_at: timestamp,
+      },
+    ], "mason installed");
+
+    const lines = renderDisplay(model, { width: 120, maxRows: 4, selectedRow: 0, fixedHeight: true });
+    const header = lines.find((line) => line.includes("Name") && line.includes("Installed At"));
+    const row = lines.find((line) => line.includes("lua-language-server"));
+
+    expect(lines.every((line) => line.length <= 120)).toBe(true);
+    expect(row).toBeDefined();
+    expect(row).toContain(timestamp);
+    expect(header).toBeDefined();
+    expect(header!.indexOf("Version") - header!.indexOf("Name")).toBe(32);
+    expect(header!.indexOf("Bins") - header!.indexOf("Version")).toBe(22);
+    expect(header!.indexOf("Installed At") - header!.indexOf("Bins")).toBe(32);
+  });
+
   test("keeps column widths stable while scrolling through different rows", () => {
     const model = modelForResult("packages", [
       {
