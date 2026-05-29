@@ -151,6 +151,26 @@ describe("Mason TUI core", () => {
     expect(header!.indexOf("Installed At") - header!.indexOf("Bins")).toBe(32);
   });
 
+  test("keeps installed timestamp visible at narrower widths", () => {
+    const timestamp = "2026-05-24T12:34:56.789123Z";
+    const model = modelForResult("installed", [
+      {
+        name: "lua-language-server",
+        version: "v3.8.0",
+        bins: { lua_ls: "bin/lua-language-server" },
+        installed_at: timestamp,
+      },
+    ], "mason installed");
+
+    const lines = renderDisplay(model, { width: 96, maxRows: 6, selectedRow: 0, fixedHeight: true });
+    const text = lines.join("\n");
+
+    expect(lines.every((line) => line.length <= 96)).toBe(true);
+    expect(text).toContain("Installed At");
+    expect(text).toContain("2026-05-24T12:34:56");
+    expect(text).toContain("789123Z");
+  });
+
   test("keeps column widths stable while scrolling through different rows", () => {
     const model = modelForResult("packages", [
       {
@@ -424,6 +444,65 @@ describe("Mason TUI core", () => {
 
     resolveRefreshedList(packages());
     await pending;
+  });
+  test("ignores stale post-package refresh after tab changes", async () => {
+    const pending: Array<{ args: string[]; resolve: (value: unknown) => void }> = [];
+    const fake: MasonTuiHost = {
+      runCli(args) {
+        if (args[0] === "install") {
+          return Promise.resolve([
+            {
+              package: "stylua",
+              version: "v2.0.0",
+              source_id: "pkg:generic/acme/stylua@v2.0.0",
+              bins: {},
+              package_dir: "/tmp/stylua",
+            },
+          ]);
+        }
+        if (args[0] === "list" || args[0] === "suggested") {
+          return new Promise((resolve) => {
+            pending.push({ args, resolve });
+          });
+        }
+        return Promise.resolve({ args });
+      },
+      syncAfterPackageChange() {},
+    };
+    const tui = createMasonTui(fake);
+
+    const packageRun = tui.install(["stylua"]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(pending.map((item) => item.args)).toEqual([["list"]]);
+
+    await tui.handleInput("q");
+    const tabRun = tui.handleInput("tab");
+    expect(pending.map((item) => item.args)).toEqual([["list"], ["suggested"]]);
+
+    pending[1]!.resolve(suggestions());
+    await tabRun;
+    expect(tui.state.command).toBe("suggested");
+    expect(tui.render()).toContain("Reason");
+
+    pending[0]!.resolve([
+      {
+        name: "stale-package",
+        version: "v0.0.1",
+        installed: false,
+        installed_version: null,
+        outdated: false,
+        deprecated: false,
+        languages: ["Lua"],
+        categories: ["Formatter"],
+        description: "stale refresh result",
+      },
+    ]);
+    await packageRun;
+
+    expect(tui.state.command).toBe("suggested");
+    expect(tui.render()).toContain("Reason");
+    expect(tui.render()).not.toContain("stale-package");
   });
   test("keeps popup height stable from active progress to result state", async () => {
     let resolveInstall!: (value: unknown) => void;

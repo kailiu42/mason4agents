@@ -260,6 +260,11 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
     return state;
   }
 
+  async function refreshPackageChange(packageName: string | undefined): Promise<void> {
+    const runId = commandRunId;
+    await refreshAfterPackageChange(state, host, packageName, () => isCurrentCommandRun(runId));
+  }
+
   const tui: MasonTui = {
     title: "mason4agents",
     state,
@@ -281,17 +286,17 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
     },
     async install(packages: string[]) {
       await runWithProgress({ argv: ["install", ...packages], resultKind: "install", title: "mason install", syncAfterPackageChange: true }, packages[0]);
-      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      if (!state.progress?.error) await refreshPackageChange(packages[0]);
       return state;
     },
     async uninstall(packages: string[]) {
       await runWithProgress({ argv: ["uninstall", ...packages], resultKind: "uninstall", title: "mason uninstall", syncAfterPackageChange: true }, packages[0]);
-      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      if (!state.progress?.error) await refreshPackageChange(packages[0]);
       return state;
     },
     async update(packages: string[] = []) {
       await runWithProgress({ argv: ["update", ...packages], resultKind: "install", title: "mason update", syncAfterPackageChange: true }, packages[0]);
-      if (!state.progress?.error) await refreshAfterPackageChange(state, host, packages[0]);
+      if (!state.progress?.error) await refreshPackageChange(packages[0]);
       return state;
     },
     async doctor() {
@@ -317,7 +322,7 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
       const planned: MasonTuiInvocation = { argv: args, resultKind, title };
       if (runOptions.syncAfterPackageChange) planned.syncAfterPackageChange = true;
       await runWithProgress(planned, runOptions.preservePackage);
-      if (runOptions.syncAfterPackageChange && !state.progress?.error) await refreshAfterPackageChange(state, host, runOptions.preservePackage);
+      if (runOptions.syncAfterPackageChange && !state.progress?.error) await refreshPackageChange(runOptions.preservePackage);
       return state;
     },
     async handleInput(...rawKeys: unknown[]) {
@@ -349,7 +354,7 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
         return;
       }
       if (isPackageActionKey(key)) {
-        await runPackageAction(state, host, key, runWithProgress);
+        await runPackageAction(state, host, key, runWithProgress, refreshPackageChange);
         return;
       }
       if (state.view === "detail") return;
@@ -423,6 +428,7 @@ interface MasonTuiInvocation {
 }
 
 type MasonTuiProgressRunner = (planned: MasonTuiInvocation, preservePackage?: string) => Promise<MasonTuiState>;
+type MasonTuiRefreshRunner = (packageName: string | undefined) => Promise<void>;
 
 function isProgressInvocation(planned: MasonTuiInvocation): boolean {
   const command = planned.argv[0];
@@ -1314,7 +1320,7 @@ function isPickerEdit(edit: MasonTuiEdit): edit is Extract<MasonTuiEdit, { kind:
   return edit.kind === "language" || edit.kind === "category";
 }
 
-async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: string, runWithProgress: MasonTuiProgressRunner): Promise<void> {
+async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: string, runWithProgress: MasonTuiProgressRunner, refreshPackageChange: MasonTuiRefreshRunner): Promise<void> {
   syncActiveRows(state);
   const name = selectedPackageName(state);
   const selected = selectedEntry(state);
@@ -1329,7 +1335,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
       setNotice(state, host, `${name} is already installed. ${shortcutText([["[u]", "update"]])}`, "error");
       return;
     }
-    await runPackageCommand(state, host, runWithProgress, ["install", name], name);
+    await runPackageCommand(state, host, runWithProgress, refreshPackageChange, ["install", name], name);
     return;
   }
   if (key === "u" || key === "U") {
@@ -1337,7 +1343,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
       setNotice(state, host, `${name} is not installed. ${shortcutText([["[i]", "install"]])}`, "error");
       return;
     }
-    await runPackageCommand(state, host, runWithProgress, ["update", name], name);
+    await runPackageCommand(state, host, runWithProgress, refreshPackageChange, ["update", name], name);
     return;
   }
   if (key === "d" || key === "D") {
@@ -1345,7 +1351,7 @@ async function runPackageAction(state: MasonTuiState, host: MasonTuiHost, key: s
       setNotice(state, host, `${name} is not installed.`, "error");
       return;
     }
-    await runPackageCommand(state, host, runWithProgress, ["uninstall", name], name);
+    await runPackageCommand(state, host, runWithProgress, refreshPackageChange, ["uninstall", name], name);
     return;
   }
   if (!installed) {
@@ -1358,6 +1364,7 @@ async function runPackageCommand(
   state: MasonTuiState,
   host: MasonTuiHost,
   runWithProgress: MasonTuiProgressRunner,
+  refreshPackageChange: MasonTuiRefreshRunner,
   argv: string[],
   packageName: string,
 ): Promise<void> {
@@ -1365,15 +1372,17 @@ async function runPackageCommand(
   const resultKind: MasonResultKind = command === "uninstall" ? "uninstall" : "install";
   await runWithProgress({ argv, resultKind, title: `mason ${command} ${packageName}`, syncAfterPackageChange: true }, packageName);
   if (state.progress?.error) return;
-  await refreshAfterPackageChange(state, host, packageName);
+  await refreshPackageChange(packageName);
 }
 
-async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string | undefined): Promise<void> {
+async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHost, packageName: string | undefined, isCurrentRun: () => boolean): Promise<void> {
   if (packageName) state.selectedPackage = packageName;
   if (state.command === "search" || state.command === "list" || state.command === "suggested" || state.command === "installed" || state.command === "update") {
     const planned = buildInvocation(state);
+    const context = captureRefreshContext(state);
     if (!state.progress || state.progress.dismissed) state.model = { kind: "summary", title: planned.title, lines: ["Loading..."] };
     const data = await host.runCli(planned.argv);
+    if (!isCurrentRun() || !isSameRefreshContext(state, context)) return;
     state.lastAction = data;
     state.model = modelForResult(planned.resultKind, data, planned.title);
     updateTableData(state, planned.resultKind, data);
@@ -1384,11 +1393,47 @@ async function refreshAfterPackageChange(state: MasonTuiState, host: MasonTuiHos
   state.command = "search";
   state.inputs.search = state.query;
   const planned = buildSearchInvocation(state);
+  const context = captureRefreshContext(state);
   const data = await host.runCli(planned.argv);
+  if (!isCurrentRun() || !isSameRefreshContext(state, context)) return;
   state.lastAction = data;
   state.model = modelForResult(planned.resultKind, data, planned.title);
   updateTableData(state, planned.resultKind, data);
   syncActiveRows(state);
+}
+
+interface MasonTuiRefreshContext {
+  command: MasonTuiCommandId;
+  query: string;
+  category: string | undefined;
+  language: string | undefined;
+  filter: string;
+  inputs: Record<MasonTuiCommandId, string>;
+}
+
+function captureRefreshContext(state: MasonTuiState): MasonTuiRefreshContext {
+  return {
+    command: state.command,
+    query: state.query,
+    category: state.category,
+    language: state.language,
+    filter: state.filter,
+    inputs: { ...state.inputs },
+  };
+}
+
+function isSameRefreshContext(state: MasonTuiState, context: MasonTuiRefreshContext): boolean {
+  if (
+    state.command !== context.command
+    || state.query !== context.query
+    || state.category !== context.category
+    || state.language !== context.language
+    || state.filter !== context.filter
+  ) return false;
+  for (const command of Object.keys(context.inputs) as MasonTuiCommandId[]) {
+    if (state.inputs[command] !== context.inputs[command]) return false;
+  }
+  return true;
 }
 
 function setNotice(state: MasonTuiState, host: MasonTuiHost, message: string, level: "info" | "error"): void {

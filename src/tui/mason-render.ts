@@ -1,6 +1,7 @@
 export interface TableColumn {
   label: string;
   minWidth?: number;
+  preferredWidth?: number;
   maxWidth?: number;
   grow?: number;
 }
@@ -207,10 +208,10 @@ function installedTable(title: string, data: unknown): TableDisplay {
     kind: "table",
     title,
     columns: [
-      { label: "Name", minWidth: 30, maxWidth: 30 },
-      { label: "Version", minWidth: 20, maxWidth: 20 },
-      { label: "Bins", minWidth: 30, maxWidth: 30 },
-      { label: "Installed At", minWidth: 32, maxWidth: 32 },
+      { label: "Name", minWidth: 12, preferredWidth: 30, maxWidth: 30 },
+      { label: "Version", minWidth: 8, preferredWidth: 20, maxWidth: 20 },
+      { label: "Bins", minWidth: 8, preferredWidth: 30, maxWidth: 30 },
+      { label: "Installed At", minWidth: 20, preferredWidth: 32, maxWidth: 32 },
     ],
     rows,
     emptyMessage: Array.isArray(data) ? "No packages installed." : "Unexpected installed package response.",
@@ -629,7 +630,7 @@ function computeColumnLayout(columns: readonly TableColumn[], rows: readonly (re
     const column = columns[index]!;
     const minWidth = columnMinWidth(column);
     const maxWidth = Math.max(minWidth, column.maxWidth ?? 80);
-    let desired = clamp(column.label.length, minWidth, maxWidth);
+    let desired = clamp(column.preferredWidth ?? column.label.length, minWidth, maxWidth);
     for (const row of rows) {
       desired = Math.max(desired, clamp((row[index] ?? "").length, minWidth, maxWidth));
     }
