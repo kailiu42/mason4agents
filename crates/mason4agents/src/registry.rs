@@ -6,11 +6,12 @@ use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
 use crate::store::InstalledState;
 use crate::types::{msg, M4aError, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::{Cursor, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -44,6 +45,39 @@ pub struct RefreshSummary {
     pub package_count: usize,
     pub cache_file: PathBuf,
     pub checksum: String,
+}
+struct RegistryCacheLock {
+    file: File,
+}
+
+impl RegistryCacheLock {
+    fn acquire_shared(paths: &MasonPaths) -> Result<Self> {
+        let file = open_registry_lock_file(paths)?;
+        file.lock_shared()?;
+        Ok(Self { file })
+    }
+
+    fn acquire_exclusive(paths: &MasonPaths) -> Result<Self> {
+        let file = open_registry_lock_file(paths)?;
+        file.lock_exclusive()?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RegistryCacheLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+fn open_registry_lock_file(paths: &MasonPaths) -> Result<File> {
+    fs::create_dir_all(&paths.locks_dir)?;
+    Ok(OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(paths.locks_dir.join("registry.lock"))?)
 }
 
 pub fn refresh_registry(paths: &MasonPaths, source: Option<&str>) -> Result<RefreshSummary> {
@@ -81,9 +115,8 @@ pub fn refresh_registry_with_progress(
         };
         let bytes = serde_json::to_vec_pretty(&cache)?;
         let checksum = hex::encode(Sha256::digest(&bytes));
-        fs::create_dir_all(&paths.registry_dir)?;
-        fs::write(paths.registry_index_file(), &bytes)?;
-        fs::write(paths.registry_checksum_file(), checksum.as_bytes())?;
+        let _lock = RegistryCacheLock::acquire_exclusive(paths)?;
+        commit_registry_cache(paths, &bytes, checksum.as_bytes())?;
         Ok(RefreshSummary {
             source,
             package_count: cache.packages.len(),
@@ -104,7 +137,190 @@ pub fn refresh_registry_with_progress(
     result
 }
 
+fn commit_registry_cache(
+    paths: &MasonPaths,
+    index_bytes: &[u8],
+    checksum_bytes: &[u8],
+) -> Result<()> {
+    fs::create_dir_all(&paths.registry_dir)?;
+    let index = paths.registry_index_file();
+    let checksum = paths.registry_checksum_file();
+    let previous_index = read_file_if_exists(&index)?;
+    let previous_checksum = read_file_if_exists(&checksum)?;
+    let tmp_index = write_registry_temp_file(&paths.registry_dir, &index, index_bytes)?;
+    let tmp_checksum = write_registry_temp_file(&paths.registry_dir, &checksum, checksum_bytes)?;
+
+    let result = (|| -> Result<()> {
+        remove_file_if_exists(&checksum)?;
+        replace_file(&tmp_index, &index)?;
+        #[cfg(test)]
+        maybe_fail_registry_commit_for_test(&checksum)?;
+        replace_file(&tmp_checksum, &checksum)?;
+        Ok(())
+    })();
+
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp_index);
+        let _ = fs::remove_file(&tmp_checksum);
+        rollback_registry_cache(
+            &paths.registry_dir,
+            &index,
+            previous_index.as_deref(),
+            &checksum,
+            previous_checksum.as_deref(),
+        )?;
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn rollback_registry_cache(
+    parent: &Path,
+    index: &Path,
+    previous_index: Option<&[u8]>,
+    checksum: &Path,
+    previous_checksum: Option<&[u8]>,
+) -> Result<()> {
+    restore_registry_file(parent, index, previous_index)?;
+    restore_registry_file(parent, checksum, previous_checksum)?;
+    Ok(())
+}
+
+fn restore_registry_file(parent: &Path, dest: &Path, previous: Option<&[u8]>) -> Result<()> {
+    match previous {
+        Some(bytes) => write_atomically(parent, dest, bytes),
+        None => {
+            remove_file_if_exists(dest)?;
+            Ok(())
+        }
+    }
+}
+
+fn write_atomically(parent: &Path, dest: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = write_registry_temp_file(parent, dest, bytes)?;
+    if let Err(err) = replace_file(&tmp, dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn write_registry_temp_file(parent: &Path, dest: &Path, bytes: &[u8]) -> Result<PathBuf> {
+    let filename = dest
+        .file_name()
+        .ok_or_else(|| msg(format!("registry path has no filename: {}", dest.display())))?
+        .to_string_lossy();
+    for counter in 0..100_u64 {
+        let tmp = parent.join(format!(".{filename}.tmp-{}-{counter}", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(err.into());
+                }
+                return Ok(tmp);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(msg(format!(
+        "could not create unique registry temp file for {}",
+        dest.display()
+    )))
+}
+
+#[cfg(windows)]
+fn replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+    let backup = backup_existing_file(dest)?;
+    if let Err(err) = fs::rename(tmp, dest) {
+        if let Some(backup) = backup {
+            let _ = fs::rename(&backup, dest);
+        }
+        return Err(err.into());
+    }
+    if let Some(backup) = backup {
+        let _ = fs::remove_file(backup);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn backup_existing_file(dest: &Path) -> Result<Option<PathBuf>> {
+    if !dest.exists() {
+        return Ok(None);
+    }
+    let parent = dest
+        .parent()
+        .ok_or_else(|| msg(format!("registry path has no parent: {}", dest.display())))?;
+    let filename = dest
+        .file_name()
+        .ok_or_else(|| msg(format!("registry path has no filename: {}", dest.display())))?
+        .to_string_lossy();
+    for counter in 0..100_u64 {
+        let backup = parent.join(format!(".{filename}.bak-{}-{counter}", std::process::id()));
+        if backup.exists() {
+            continue;
+        }
+        match fs::rename(dest, &backup) {
+            Ok(()) => return Ok(Some(backup)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(msg(format!(
+        "could not create unique registry backup file for {}",
+        dest.display()
+    )))
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+    Ok(fs::rename(tmp, dest)?)
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_file_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+static FAIL_REGISTRY_CHECKSUM_COMMITS: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn maybe_fail_registry_commit_for_test(path: &Path) -> Result<()> {
+    let paths = FAIL_REGISTRY_CHECKSUM_COMMITS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut paths = paths.lock().expect("registry commit failure lock");
+    if let Some(index) = paths.iter().position(|candidate| candidate == path) {
+        paths.remove(index);
+        return Err(msg("injected registry checksum commit failure"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn fail_next_registry_checksum_commit_for_test(path: &Path) {
+    FAIL_REGISTRY_CHECKSUM_COMMITS
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .expect("registry commit failure lock")
+        .push(path.to_path_buf());
+}
 pub fn load_cached_registry(paths: &MasonPaths) -> Result<RegistryCache> {
+    let _lock = RegistryCacheLock::acquire_shared(paths)?;
     let index = paths.registry_index_file();
     let checksum_path = paths.registry_checksum_file();
     if !index.exists() {
@@ -365,24 +581,30 @@ mod tests {
         MasonPaths::from_getter(|key| env.get(key).cloned()).unwrap()
     }
 
-    fn write_registry(root: &Path) -> PathBuf {
+    fn write_registry_with_version(root: &Path, version: &str) -> PathBuf {
         let dir = root.join("registry/packages/demo");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("package.yaml"),
-            r#"
+            format!(
+                r#"
 name: demo
 description: Demo package
 languages: [Rust]
 categories: [Formatter]
 source:
-  id: pkg:generic/acme/demo@1.0.0
+  id: pkg:generic/acme/demo@{version}
 bin:
   demo: demo
-"#,
+"#
+            ),
         )
         .unwrap();
         root.join("registry")
+    }
+
+    fn write_registry(root: &Path) -> PathBuf {
+        write_registry_with_version(root, "1.0.0")
     }
 
     #[test]
@@ -401,6 +623,29 @@ bin:
         ));
     }
 
+    #[test]
+    fn refresh_rolls_back_if_checksum_commit_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let registry = write_registry_with_version(tmp.path(), "1.0.0");
+        let source = registry.to_str().unwrap();
+
+        refresh_registry(&paths, Some(source)).unwrap();
+        write_registry_with_version(tmp.path(), "2.0.0");
+        fail_next_registry_checksum_commit_for_test(&paths.registry_checksum_file());
+
+        let err = refresh_registry(&paths, Some(source)).unwrap_err();
+        assert_eq!(err.to_string(), "injected registry checksum commit failure");
+
+        let loaded = load_cached_registry(&paths).unwrap();
+        assert_eq!(
+            loaded.packages.get("demo").unwrap().source.id,
+            "pkg:generic/acme/demo@1.0.0"
+        );
+        let checksum = fs::read_to_string(paths.registry_checksum_file()).unwrap();
+        let bytes = fs::read(paths.registry_index_file()).unwrap();
+        assert_eq!(checksum.trim(), hex::encode(Sha256::digest(&bytes)));
+    }
     #[test]
     fn load_or_refresh_uses_cache_unless_source_is_explicit() {
         let tmp = tempfile::tempdir().unwrap();
