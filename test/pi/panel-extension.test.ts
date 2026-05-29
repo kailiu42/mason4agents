@@ -464,7 +464,75 @@ describe("Pi extension", () => {
     }
   });
 
-  test("direct long command opens progress panel and blocks another long command", async () => {
+  test("releases reserved long operation when the custom panel closes before the initial command starts", async () => {
+    const calls: string[][] = [];
+    let component: { handleInput(...keys: unknown[]): void } | undefined;
+    let reserved: Promise<unknown> | undefined;
+    const fake: CliBridge = {
+      run(args) {
+        calls.push(args);
+        return Promise.resolve([]);
+      },
+    };
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom(factory: Function) {
+          component = factory({ requestRender() {} }, fakeTheme(), undefined, () => {});
+        },
+      },
+    };
+
+    await openMasonPanel(ctx, fake, {
+      initialCommand: {
+        argv: ["install", "stylua"],
+        resultKind: "install",
+        title: "mason install stylua",
+      },
+      onLongOperationStart(promise) {
+        reserved = promise;
+      },
+    });
+    expect(calls).toEqual([]);
+    component?.handleInput("q");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual([]);
+    await expect(reserved).resolves.toBeUndefined();
+  });
+
+  test("releases reserved long operation when the initial custom render never starts", async () => {
+    const calls: string[][] = [];
+    let reserved: Promise<unknown> | undefined;
+    const fake: CliBridge = {
+      run(args) {
+        calls.push(args);
+        return Promise.resolve([]);
+      },
+    };
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom(factory: Function) {
+          factory({ requestRender() {} }, fakeTheme(), undefined, () => {});
+        },
+      },
+    };
+
+    await openMasonPanel(ctx, fake, {
+      initialCommand: {
+        argv: ["install", "stylua"],
+        resultKind: "install",
+        title: "mason install stylua",
+      },
+      onLongOperationStart(promise) {
+        reserved = promise;
+      },
+    });
+    expect(calls).toEqual([]);
+    await expect(reserved).resolves.toBeUndefined();
+  });
+  test("direct long command reserves before render and blocks another long command", async () => {
     const handlers: Record<string, (args: string, commandCtx: unknown) => Promise<unknown> | unknown> = {};
     const notifications: string[] = [];
     const calls: string[][] = [];
@@ -521,21 +589,18 @@ describe("Pi extension", () => {
 
     await activate(ctx, fake);
     await handlers.mason?.("install stylua", commandCtx);
+    await handlers.mason?.("update stylua", commandCtx);
     expect(customCalls).toBe(1);
     expect(calls).toEqual([]);
-
+    expect(notifications[0]).toContain("already running");
     expect(component?.render(80).join("\n")).toContain("Loading...");
+
     await waitForInitialPanelLoad();
     expect(calls).toEqual([["install", "stylua"]]);
     const progressLines = (component?.render(120) as string[]).map(stripAnsi);
     expect(progressLines.join("\n")).toContain("operation progress");
     const progressTitleLine = progressLines.find((line) => line.includes("operation progress"));
     expect(progressTitleLine?.trim().length).toBe(60);
-
-    await handlers.mason?.("update stylua", commandCtx);
-    expect(notifications[0]).toContain("already running");
-    expect(customCalls).toBe(1);
-    expect(calls).toEqual([["install", "stylua"]]);
 
     resolveInstall([{ package: "stylua", version: "v2.0.0", source_id: "pkg:generic/acme/stylua@v2.0.0", bins: {}, package_dir: "/tmp/stylua" }]);
     await waitForInitialPanelLoad();
