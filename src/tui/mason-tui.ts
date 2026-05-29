@@ -189,6 +189,10 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
   };
   let commandRunId = 0;
 
+  function invalidateCommandRuns(): void {
+    commandRunId += 1;
+  }
+
   function nextCommandRunId(): number {
     commandRunId += 1;
     return commandRunId;
@@ -341,12 +345,12 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
       if (isQuitKey(key)) return "close";
       if (isNextCommandKey(key)) {
         selectCommand(state, state.commandIndex + 1);
-        await runSelectedCommand(tui, state);
+        await runSelectedCommand(tui, state, invalidateCommandRuns);
         return;
       }
       if (isPreviousCommandKey(key)) {
         selectCommand(state, state.commandIndex - 1);
-        await runSelectedCommand(tui, state);
+        await runSelectedCommand(tui, state, invalidateCommandRuns);
         return;
       }
       if (state.command === "refresh" && isRefreshKey(key)) {
@@ -611,8 +615,13 @@ function buildInvocation(state: MasonTuiState): MasonTuiInvocation {
   }
 }
 
-async function runSelectedCommand(tui: MasonTui, state: MasonTuiState): Promise<MasonTuiState> {
+async function runSelectedCommand(
+  tui: MasonTui,
+  state: MasonTuiState,
+  invalidateCommandRuns: () => void = () => {},
+): Promise<MasonTuiState> {
   if (state.command === "refresh") {
+    invalidateCommandRuns();
     showRefreshPrompt(state);
     return state;
   }
@@ -860,9 +869,8 @@ function renderProgressContentSections(
 
   if (progress.finalModel) {
     middle.push("");
-    middle.push(...renderDisplay(progress.finalModel, { width, maxRows: 8, fixedHeight: false, showTitle: true, showHelp: false, style }));
+    middle.push(...renderProgressFinalModelLines(progress.finalModel, width, style));
   }
-
   const foot = [""];
   if (progress.active && progress.timedOut) {
     foot.push(`No progress for ${Math.ceil(progress.timeoutMs / 1000)}s. The CLI is still running.`);
@@ -874,6 +882,11 @@ function renderProgressContentSections(
     foot.push(renderShortcutLine("", [["[↑↓/Pg]", "scroll"], ["[q]/[Esc]", "close"]], width, style));
   }
   return { head, middle, foot };
+}
+
+function renderProgressFinalModelLines(model: DisplayModel, width: number, style: MasonTuiStyle): string[] {
+  const maxRows = model.kind === "table" ? Math.max(1, model.rows.length) : 8;
+  return renderDisplay(model, { width, maxRows, fixedHeight: false, showTitle: true, showHelp: false, style });
 }
 
 function progressStatusLine(progress: MasonTuiProgressState): string {
@@ -1102,8 +1115,8 @@ function syncActiveRows(state: MasonTuiState): void {
   const entries = state.model.rows.map((row, index) => ({ row, item: state.tableItems[index] }));
   const filtered = entries.filter((entry) => {
     if (nameFilter.length > 0 && !packageNameFromItemOrRow(entry.item, entry.row)?.toLocaleLowerCase().includes(nameFilter)) return false;
-    if (languageFilter.length > 0 && !languagesFromItemOrRow(entry.item, entry.row).toLocaleLowerCase().includes(languageFilter)) return false;
-    if (categoryFilter.length > 0 && !categoriesFromItemOrRow(entry.item, entry.row).toLocaleLowerCase().includes(categoryFilter)) return false;
+    if (!listMatchesFilter(entry.item, entry.row, "languages", 4, languageFilter)) return false;
+    if (!listMatchesFilter(entry.item, entry.row, "categories", 5, categoryFilter)) return false;
     return true;
   });
   state.activeRows = filtered.map((entry) => entry.row);
@@ -1226,6 +1239,16 @@ function handlePickerFilterKey(state: MasonTuiState, edit: Extract<MasonTuiEdit,
     commitPickerFilterSelection(state, edit);
     return;
   }
+  if (key === "\b" || key === "\x7f" || key === "backspace") {
+    const draft = edit.filterDraft ?? "";
+    if (draft.length === 0) {
+      delete edit.filterDraft;
+    } else {
+      edit.filterDraft = draft.slice(0, -1);
+    }
+    selectFirstPickerOption(edit);
+    return;
+  }
   if (isBackKey(key)) {
     delete edit.filterDraft;
     selectFirstPickerOption(edit);
@@ -1234,16 +1257,6 @@ function handlePickerFilterKey(state: MasonTuiState, edit: Extract<MasonTuiEdit,
   if (key === "/") {
     delete edit.filterDraft;
     selectFirstPickerOption(edit);
-    return;
-  }
-  if (key === "\b" || key === "\x7f" || key === "backspace") {
-    edit.filterDraft = (edit.filterDraft ?? "").slice(0, -1);
-    if ((edit.filterDraft ?? "").trim().length < LIVE_NAME_FILTER_MIN_CHARS) {
-      delete edit.filterDraft;
-      selectFirstPickerOption(edit);
-    } else {
-      selectFirstPickerOption(edit);
-    }
     return;
   }
   if (isScrollDownKey(key)) { movePickerSelection(edit, 1); return; }
@@ -1497,6 +1510,15 @@ function languagesFromItemOrRow(item: unknown, row: readonly string[]): string {
 
 function categoriesFromItemOrRow(item: unknown, row: readonly string[]): string {
   return listValuesFromItemOrRow(item, row, "categories", 5).join(",");
+}
+
+function listMatchesFilter(item: unknown, row: readonly string[], property: "languages" | "categories", columnIndex: number, filter: string): boolean {
+  const normalizedFilter = normalizeListEntry(filter);
+  if (normalizedFilter.length === 0) return true;
+  for (const value of listValuesFromItemOrRow(item, row, property, columnIndex)) {
+    if (normalizeListEntry(value) === normalizedFilter) return true;
+  }
+  return false;
 }
 
 function listValuesFromItemOrRow(item: unknown, row: readonly string[], property: "languages" | "categories", columnIndex: number): string[] {
@@ -1853,6 +1875,10 @@ function splitListCell(value: string | undefined): string[] {
     if (text.length > 0) result.push(text);
   }
   return result;
+}
+
+function normalizeListEntry(value: string): string {
+  return value.trim().toLocaleLowerCase();
 }
 
 function keyList(value: unknown): string {

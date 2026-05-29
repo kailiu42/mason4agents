@@ -30,6 +30,33 @@ function packages() {
   ];
 }
 
+function collisionPackages() {
+  return [
+    {
+      name: "clangd",
+      version: "v1.0.0",
+      installed: false,
+      installed_version: null,
+      outdated: false,
+      deprecated: false,
+      languages: ["C"],
+      categories: ["Lint"],
+      description: "C tooling",
+    },
+    {
+      name: "typescript-language-server",
+      version: "v4.0.0",
+      installed: false,
+      installed_version: null,
+      outdated: false,
+      deprecated: false,
+      languages: ["TypeScript", "JavaScript"],
+      categories: ["Splinting"],
+      description: "TypeScript LSP",
+    },
+  ];
+}
+
 function suggestions() {
   return packages().map((pkg) => ({
     ...pkg,
@@ -620,6 +647,35 @@ describe("Mason TUI core", () => {
     ]);
     await pending;
   });
+  test("allows scrolling to later rows in final progress result tables", async () => {
+    const results = Array.from({ length: 20 }, (_, index) => ({
+      package: `pkg-${String(index + 1).padStart(2, "0")}`,
+      version: "v1.0.0",
+      source_id: `pkg:generic/acme/pkg-${String(index + 1).padStart(2, "0")}@v1.0.0`,
+      bins: {},
+      package_dir: `/tmp/pkg-${String(index + 1).padStart(2, "0")}`,
+    }));
+    const fake: MasonTuiHost = {
+      runCli(args) {
+        if (args[0] === "install") return Promise.resolve(results);
+        return Promise.resolve({ args });
+      },
+    };
+    const tui = createMasonTui(fake, { progressTimeoutMs: 60_000 });
+
+    await tui.runProgress(["install", "pkg-01"], "install", "mason install");
+
+    const initialLines = tui.renderLines(120).map(stripAnsi).join("\n");
+    expect(initialLines).toContain("operation result");
+    expect(initialLines).toContain("pkg-01");
+    expect(initialLines).not.toContain("pkg-20");
+
+    await tui.handleInput("G");
+
+    const scrolledLines = tui.renderLines(120).map(stripAnsi).join("\n");
+    expect(scrolledLines).toContain("pkg-20");
+  });
+
   test("renders suggested rows with installed marker and state-aware shortcuts", async () => {
     const { host: fake, calls } = host();
     const tui = createMasonTui(fake);
@@ -691,6 +747,64 @@ describe("Mason TUI core", () => {
     expect(tui.state.command).toBe("list");
   });
 
+  test("keeps the refresh prompt visible when an older tab run resolves afterward", async () => {
+    let resolveOutdated!: (value: unknown) => void;
+    const fake: MasonTuiHost = {
+      runCli(args) {
+        if (args[0] === "suggested") return Promise.resolve(suggestions());
+        if (args[0] === "list" && args.includes("--installed")) {
+          return Promise.resolve([
+            {
+              name: "lua-language-server",
+              version: "v3.8.0",
+              bins: { "lua-language-server": "bin/lua-language-server" },
+              installed_at: "2026-05-24T00:00:00Z",
+            },
+          ]);
+        }
+        if (args[0] === "list" && args.includes("--outdated")) {
+          return new Promise((resolve) => {
+            resolveOutdated = resolve;
+          });
+        }
+        if (args[0] === "list") return Promise.resolve(packages());
+        return Promise.resolve({ args });
+      },
+    };
+    const tui = createMasonTui(fake);
+
+    await tui.runCurrent();
+    await tui.handleInput("right");
+    await tui.handleInput("right");
+
+    const pendingUpdateTab = tui.handleInput("right");
+    await Promise.resolve();
+
+    expect(tui.state.command).toBe("update");
+    expect(tui.render()).toContain("Loading...");
+
+    await tui.handleInput("right");
+    expect(tui.state.command).toBe("refresh");
+    expect(tui.render()).toContain("[r]: refresh registry");
+
+    resolveOutdated([
+      {
+        name: "stale-package",
+        version: "v0.0.1",
+        installed: false,
+        installed_version: null,
+        outdated: true,
+        deprecated: false,
+        languages: ["Lua"],
+        categories: ["Formatter"],
+        description: "stale outdated result",
+      },
+    ]);
+    await pendingUpdateTab;
+
+    expect(tui.render()).toContain("[r]: refresh registry");
+    expect(tui.render()).not.toContain("stale-package");
+  });
   test("filters list rows by name, language, and category without running search", async () => {
     const calls: string[][] = [];
     const fake: MasonTuiHost = {
@@ -753,7 +867,25 @@ describe("Mason TUI core", () => {
     await tui.handleInput("/");
     for (const key of "typ") await tui.handleInput(key);
     expect(tui.render()).toContain("[/ typ]");
+    await tui.handleInput("backspace");
+    expect(tui.render()).toContain("[/ ty]");
+    expect(tui.render()).toContain("select language");
+    await tui.handleInput("escape");
+    expect(tui.render()).not.toContain("[/ ty]");
+
+    await tui.handleInput("/");
+    await tui.handleInput("t");
+    await tui.handleInput("backspace");
+    expect(tui.render()).toContain("[/ ]");
+    expect(tui.render()).toContain("select language");
+    await tui.handleInput("backspace");
+    expect(tui.render()).not.toContain("[/ ]");
+
+    await tui.handleInput("/");
+    for (const key of "typ") await tui.handleInput(key);
+    expect(tui.render()).toContain("[/ typ]");
     await tui.handleInput("enter");
+
 
     expect(tui.state.edit).toBeUndefined();
     expect(tui.render()).not.toContain("select language");
@@ -763,6 +895,37 @@ describe("Mason TUI core", () => {
     expect(tui.render()).toContain("[c LSP]");
     expect(tui.render()).toContain("typescript-language-server");
     expect(tui.render()).not.toContain("lua-language-server");
+    expect(calls).toEqual([["list"]]);
+  });
+
+  test("matches language and category filters against exact list entries", async () => {
+    const calls: string[][] = [];
+    const fake: MasonTuiHost = {
+      async runCli(args: string[]) {
+        calls.push(args);
+        return collisionPackages();
+      },
+    };
+    const tui = createMasonTui(fake);
+    await tui.runCurrent();
+
+    await tui.handleInput("l");
+    await tui.handleInput("down");
+    await tui.handleInput("enter");
+
+    expect(tui.state.language).toBe("C");
+    expect(tui.render()).toContain("[l C]");
+    expect(tui.render()).toContain("clangd");
+    expect(tui.render()).not.toContain("typescript-language-server");
+
+    await tui.handleInput("c");
+    await tui.handleInput("down");
+    await tui.handleInput("enter");
+
+    expect(tui.state.category).toBe("Lint");
+    expect(tui.render()).toContain("[c Lint]");
+    expect(tui.render()).toContain("clangd");
+    expect(tui.render()).not.toContain("typescript-language-server");
     expect(calls).toEqual([["list"]]);
   });
 
