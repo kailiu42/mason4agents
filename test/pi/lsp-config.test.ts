@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { syncMasonLspConfig } from "../../src/pi/lsp-config";
+import { atomicWriteFileSync, syncMasonLspConfig } from "../../src/pi/lsp-config";
 import { registerInstalledTools, renderRegisterResult } from "../../src/pi/register";
 
 const roots: string[] = [];
@@ -41,6 +41,36 @@ describe("Mason LSP config sync", () => {
     expect(json.servers).toMatchObject({
       "rust-analyzer": { command: join(binDir, "rust-analyzer"), warmupTimeoutMs: 5000 },
     });
+  });
+
+  test("atomic config write keeps existing file intact and cleans tmp when rename fails", () => {
+    const { configPath } = tempEnv();
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, "existing config\n");
+    const tmpPath = join(dirname(configPath), ".lsp.json.test.tmp");
+
+    expect(() => atomicWriteFileSync(configPath, "replacement config\n", {
+      tmpPath,
+      renameSync() {
+        throw new Error("rename failed");
+      },
+    })).toThrow("rename failed");
+
+    expect(readFileSync(configPath, "utf8")).toBe("existing config\n");
+    expect(existsSync(tmpPath)).toBe(false);
+  });
+
+  test("skips invalid existing JSON without rewriting it", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, "{not json");
+
+    const result = syncMasonLspConfig(env);
+
+    expect(result).toMatchObject({ configPath, servers: ["rust-analyzer"], changed: false, skipped: "invalid_json" });
+    expect(readFileSync(configPath, "utf8")).toBe("{not json");
   });
 
   test("writes full config for fallback LSP packages outside OMP built-ins", () => {
@@ -465,6 +495,82 @@ describe("Mason LSP config sync", () => {
 
     expect(json.servers).toMatchObject({
       "rust-analyzer": { command: join(binDir, "rust-analyzer"), warmupTimeoutMs: 10000 },
+    });
+  });
+
+  test("preserves existing absolute non-Mason command with matching basename", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, JSON.stringify({
+      servers: {
+        "rust-analyzer": { command: "/usr/bin/rust-analyzer", args: ["--stdio"] },
+      },
+    }));
+
+    syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(json.servers).toMatchObject({
+      "rust-analyzer": { command: "/usr/bin/rust-analyzer", args: ["--stdio"], warmupTimeoutMs: 5000 },
+    });
+  });
+
+  test("updates existing bare command with matching Mason command", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, JSON.stringify({
+      servers: {
+        "rust-analyzer": { command: "rust-analyzer", args: ["--stdio"] },
+      },
+    }));
+
+    syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(json.servers).toMatchObject({
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), args: ["--stdio"], warmupTimeoutMs: 5000 },
+    });
+  });
+
+  test("updates existing command already inside Mason bin directory", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, JSON.stringify({
+      servers: {
+        "rust-analyzer": { command: join(binDir, "old-rust-analyzer"), args: ["--stdio"] },
+      },
+    }));
+
+    syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(json.servers).toMatchObject({
+      "rust-analyzer": { command: join(binDir, "rust-analyzer"), args: ["--stdio"], warmupTimeoutMs: 5000 },
+    });
+  });
+
+  test("preserves existing relative non-Mason command with path separator and matching basename", () => {
+    const { env, binDir, configPath } = tempEnv();
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(join(binDir, "rust-analyzer"), "");
+    writeFileSync(configPath, JSON.stringify({
+      servers: {
+        "rust-analyzer": { command: "tools/rust-analyzer", args: ["--stdio"] },
+      },
+    }));
+
+    syncMasonLspConfig(env);
+    const json = readJson(configPath);
+
+    expect(json.servers).toMatchObject({
+      "rust-analyzer": { command: "tools/rust-analyzer", args: ["--stdio"], warmupTimeoutMs: 5000 },
     });
   });
 

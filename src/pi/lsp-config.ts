@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { masonBinDir, masonCacheDir, masonStateDir } from "./path-env";
@@ -127,7 +128,7 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
       changed = true;
       continue;
     }
-    const next = mergeServerConfig(current, config);
+    const next = mergeServerConfig(current, config, binDir);
     if (shouldUpdateServerConfig(current, next, binDir)) {
       nextServers[server] = next;
       changed = true;
@@ -149,8 +150,7 @@ export function syncMasonLspConfig(env: NodeJS.ProcessEnv = process.env): MasonL
     return { configPath, servers, lspPackages, changed: false };
   }
 
-  mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(configPath, `${JSON.stringify(nextRoot, null, 2)}\n`);
+  atomicWriteFileSync(configPath, `${JSON.stringify(nextRoot, null, 2)}\n`);
   return { configPath, servers, lspPackages, changed: true };
 }
 
@@ -301,8 +301,11 @@ function isFileLike(path: string): boolean {
   }
 }
 
-function mergeServerConfig(current: Record<string, unknown>, config: OmpLspServerConfig): Record<string, unknown> {
+function mergeServerConfig(current: Record<string, unknown>, config: OmpLspServerConfig, binDir: string): Record<string, unknown> {
   const next: Record<string, unknown> = { ...current, ...config };
+  if (!shouldUpdateCommand(current.command, config.command, binDir)) {
+    next.command = current.command;
+  }
   if (
     typeof current.warmupTimeoutMs === "number"
     && current.warmupTimeoutMs > GENERATED_LSP_WARMUP_TIMEOUT_MS
@@ -320,8 +323,12 @@ function shouldUpdateServerConfig(current: Record<string, unknown>, next: Record
 function shouldUpdateCommand(current: unknown, next: string, binDir: string): boolean {
   if (typeof current !== "string" || current.length === 0) return true;
   if (current === next) return false;
-  if (basename(current) === basename(next)) return true;
-  return pathIsWithin(resolve(current), binDir);
+  if (pathIsWithin(resolve(current), binDir)) return true;
+  return isBareCommand(current) && basename(current) === basename(next);
+}
+
+function isBareCommand(command: string): boolean {
+  return !command.includes("/") && !command.includes("\\");
 }
 
 function isGeneratedCommand(current: unknown, previousBinDir: string, binDir: string): boolean {
@@ -339,6 +346,30 @@ function generatedMetadata(value: unknown): { binDir?: string; servers: string[]
     result.binDir = value.binDir;
   }
   return result;
+}
+
+export interface AtomicWriteFileSyncOps {
+  tmpPath?: string;
+  writeFileSync?: typeof writeFileSync;
+  renameSync?: typeof renameSync;
+  unlinkSync?: typeof unlinkSync;
+}
+
+export function atomicWriteFileSync(path: string, data: string, ops: AtomicWriteFileSyncOps = {}): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = ops.tmpPath ?? join(dir, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    (ops.writeFileSync ?? writeFileSync)(tmpPath, data);
+    (ops.renameSync ?? renameSync)(tmpPath, path);
+  } catch (error) {
+    try {
+      (ops.unlinkSync ?? unlinkSync)(tmpPath);
+    } catch {
+      // Best-effort cleanup only; preserve the original write/rename failure.
+    }
+    throw error;
+  }
 }
 
 function readJsonObject(path: string): Record<string, unknown> | undefined | null {
