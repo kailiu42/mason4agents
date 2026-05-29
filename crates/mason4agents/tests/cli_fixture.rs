@@ -1,4 +1,7 @@
 use assert_cmd::Command;
+use mason4agents::package_spec::RawPackageSpec;
+use mason4agents::platform::Platform;
+use mason4agents::M4aError;
 use predicates::prelude::*;
 use serde_json::{json, Value};
 use std::fs;
@@ -36,12 +39,49 @@ fn stderr_progress_events(assert: &assert_cmd::assert::Assert) -> Vec<Value> {
         .collect()
 }
 
+fn normalize_package_spec_asset(
+    package_yaml: &str,
+) -> Result<mason4agents::package_spec::NormalizedPackage, M4aError> {
+    let raw: RawPackageSpec = serde_yaml::from_str(package_yaml).unwrap();
+    raw.normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+}
+
+#[test]
+fn json_parse_error_with_backslashes_is_valid_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = cmd(tmp.path())
+        .args(["--json", "--bad\\flag"])
+        .assert()
+        .failure();
+
+    let output = assert.get_output();
+    assert!(output.stderr.is_empty());
+
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"]["code"], "parse_error");
+    assert!(!value["error"]["message"].as_str().unwrap().is_empty());
+}
 fn write_zip(path: &Path, text: &[u8]) {
     let file = fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     zip.start_file("pkg/bin/hello", FileOptions::<()>::default())
         .unwrap();
     zip.write_all(text).unwrap();
+    zip.finish().unwrap();
+}
+fn write_zip_with_links(path: &Path, text: &[u8]) {
+    let file = fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file("pkg/bin/hello", FileOptions::<()>::default())
+        .unwrap();
+    zip.write_all(text).unwrap();
+    zip.start_file("pkg/bin/share/hello.txt", FileOptions::<()>::default())
+        .unwrap();
+    zip.write_all(b"share").unwrap();
+    zip.start_file("pkg/bin/opt/hello.txt", FileOptions::<()>::default())
+        .unwrap();
+    zip.write_all(b"opt").unwrap();
     zip.finish().unwrap();
 }
 
@@ -107,6 +147,41 @@ source:
 "#,
             languages.join(","),
             categories.join(",")
+        ),
+    )
+    .unwrap();
+}
+fn write_registry_package_with_links(
+    root: &Path,
+    name: &str,
+    archive: &Path,
+    version: &str,
+    bin_name: &str,
+    share_name: &str,
+    opt_name: &str,
+) {
+    let dir = root.join("registry/packages").join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("package.yaml"),
+        format!(
+            r#"
+name: {name}
+description: {name} fixture
+languages: [Shell]
+categories: [Formatter]
+source:
+  id: pkg:generic/acme/{name}@{version}
+  asset:
+    file: '{}:pkg/bin/'
+bin:
+  {bin_name}: hello
+share:
+  {share_name}: share
+opt:
+  {opt_name}: opt
+"#,
+            archive.display()
         ),
     )
     .unwrap();
@@ -238,6 +313,130 @@ fn cli_refresh_search_install_which_env_uninstall_flow() {
     );
     assert_eq!(uninstalled["data"][0]["removed"], true);
     assert!(!bin.exists());
+}
+#[test]
+fn install_rejects_cross_package_link_conflicts_without_breaking_first_package() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("tool.zip");
+    write_zip_with_links(&archive, b"#!/bin/sh\necho ok\n");
+    write_registry_package_with_links(
+        tmp.path(),
+        "alpha",
+        &archive,
+        "1.0.0",
+        "tool",
+        "shared-data",
+        "shared-runtime",
+    );
+    write_registry_package_with_links(
+        tmp.path(),
+        "beta",
+        &archive,
+        "1.0.0",
+        "tool",
+        "shared-data",
+        "shared-runtime",
+    );
+    let registry = tmp.path().join("registry");
+    refresh_fixture_registry(tmp.path(), &registry);
+
+    output_json(
+        cmd(tmp.path())
+            .args(["install", "alpha", "--json"])
+            .assert()
+            .success(),
+    );
+    let bin = tmp.path().join("data/mason4agents/bin/tool");
+    let share = tmp.path().join("data/mason4agents/share/shared-data");
+    let opt = tmp.path().join("data/mason4agents/opt/shared-runtime");
+    let alpha_dir = tmp.path().join("data/mason4agents/packages/alpha");
+    let original_bin = fs::read_link(&bin).unwrap();
+    let original_share = fs::read_link(&share).unwrap();
+    let original_opt = fs::read_link(&opt).unwrap();
+
+    let failed = output_json(
+        cmd(tmp.path())
+            .args(["install", "beta", "--json"])
+            .assert()
+            .failure(),
+    );
+
+    assert_eq!(failed["ok"], false);
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("bin 'tool' is owned by 'alpha'"));
+    assert!(message.contains("share 'shared-data' is owned by 'alpha'"));
+    assert!(message.contains("opt 'shared-runtime' is owned by 'alpha'"));
+
+    let installed = output_json(
+        cmd(tmp.path())
+            .args(["list", "--installed", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(installed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(installed["data"][0]["name"], "alpha");
+    assert_eq!(fs::read_link(&bin).unwrap(), original_bin);
+    assert_eq!(fs::read_link(&share).unwrap(), original_share);
+    assert_eq!(fs::read_link(&opt).unwrap(), original_opt);
+    assert!(alpha_dir.exists());
+    assert!(!tmp.path().join("data/mason4agents/packages/beta").exists());
+}
+
+#[test]
+fn update_allows_same_package_to_replace_its_own_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive_v1 = tmp.path().join("hello-v1.zip");
+    write_zip_with_links(&archive_v1, b"#!/bin/sh\necho v1\n");
+    write_registry_package_with_links(
+        tmp.path(),
+        "hello",
+        &archive_v1,
+        "1.0.0",
+        "hello",
+        "hello-share",
+        "hello-opt",
+    );
+    let registry = tmp.path().join("registry");
+    refresh_fixture_registry(tmp.path(), &registry);
+
+    output_json(
+        cmd(tmp.path())
+            .args(["install", "hello", "--json"])
+            .assert()
+            .success(),
+    );
+
+    let archive_v2 = tmp.path().join("hello-v2.zip");
+    write_zip_with_links(&archive_v2, b"#!/bin/sh\necho v2\n");
+    write_registry_package_with_links(
+        tmp.path(),
+        "hello",
+        &archive_v2,
+        "2.0.0",
+        "hello",
+        "hello-share",
+        "hello-opt",
+    );
+    refresh_fixture_registry(tmp.path(), &registry);
+
+    let updated = output_json(
+        cmd(tmp.path())
+            .args(["update", "hello", "--json"])
+            .assert()
+            .success(),
+    );
+
+    assert_eq!(updated["data"][0]["version"], "2.0.0");
+    let bin = tmp.path().join("data/mason4agents/bin/hello");
+    let share = tmp.path().join("data/mason4agents/share/hello-share");
+    let opt = tmp.path().join("data/mason4agents/opt/hello-opt");
+    assert!(bin.exists());
+    assert!(share.exists());
+    assert!(opt.exists());
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("data/mason4agents/packages/hello/hello")).unwrap(),
+        "#!/bin/sh\necho v2\n"
+    );
 }
 
 #[test]
@@ -462,4 +661,65 @@ fn cli_suggested_filters_missing_registry_packages_and_uses_cached_curated_sourc
             .success(),
     );
     assert_eq!(stale["data"][0]["source"], "fixture-lazyvim");
+}
+
+#[test]
+fn object_asset_target_must_match_platform() {
+    let pkg = normalize_package_spec_asset(
+        r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    target: linux_x64_gnu
+    file: demo.zip
+    bin: demo
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        pkg.source.asset.as_ref().unwrap().file.as_deref(),
+        Some("demo.zip")
+    );
+}
+
+#[test]
+fn object_asset_target_mismatch_returns_unsupported_target() {
+    let err = normalize_package_spec_asset(
+        r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    target: win_x64
+    file: demo.zip
+"#,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        M4aError::UnsupportedTarget { package, targets }
+            if package == "demo" && targets == vec!["win_x64".to_owned()]
+    ));
+}
+
+#[test]
+fn object_asset_without_target_still_normalizes() {
+    let pkg = normalize_package_spec_asset(
+        r#"
+name: demo
+source:
+  id: pkg:github/acme/demo@v1.0.0
+  asset:
+    file: demo.zip
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        pkg.source.asset.as_ref().unwrap().file.as_deref(),
+        Some("demo.zip")
+    );
 }
