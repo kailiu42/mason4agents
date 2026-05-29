@@ -77,6 +77,29 @@ describe("Pi tools", () => {
     ]);
   });
 
+  test("rejects conflicting list filters", async () => {
+    const { bridge, calls } = fakeBridge();
+    const list = createPiTools(bridge).find((tool) => tool.name === "mason_list")!;
+
+    await expect(list.execute("1", { installed: true, outdated: true })).rejects.toThrow(
+      "installed and outdated filters are mutually exclusive"
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("accepts single list filters", async () => {
+    const { bridge, calls } = fakeBridge();
+    const list = createPiTools(bridge).find((tool) => tool.name === "mason_list")!;
+
+    await list.execute("1", { installed: true });
+    await list.execute("2", { outdated: true });
+
+    expect(calls).toEqual([
+      ["list", "--installed"],
+      ["list", "--outdated"]
+    ]);
+  });
+
   test("validates required tool inputs", async () => {
     const { bridge } = fakeBridge();
     const install = createPiTools(bridge).find((tool) => tool.name === "mason_install")!;

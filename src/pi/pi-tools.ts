@@ -24,7 +24,7 @@ export interface PiToolsOptions {
 export function createPiTools(bridge: CliBridge, toolOptions: PiToolsOptions = {}): PiToolDefinition[] {
   return [
     tool("mason_list", "mason list", "List Mason packages", listSchema(), async (input, runOptions) => {
-      const args = validateObject(input);
+      const args = validateListArgs(input);
       const argv = ["list"];
       if (args.installed === true) argv.push("--installed");
       if (args.outdated === true) argv.push("--outdated");
@@ -125,6 +125,13 @@ function validateObject(input: unknown): Record<string, unknown> {
   if (input === undefined || input === null) return {};
   if (typeof input !== "object" || Array.isArray(input)) throw new Error("tool input must be an object");
   return input as Record<string, unknown>;
+}
+function validateListArgs(input: unknown): Record<string, unknown> {
+  const args = validateObject(input);
+  if (args.installed === true && args.outdated === true) {
+    throw new Error("installed and outdated filters are mutually exclusive");
+  }
+  return args;
 }
 
 function validateStringArray(value: unknown, name: string): string[] {
