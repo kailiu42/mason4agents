@@ -35,6 +35,8 @@ jobs:
 
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
+      - name: Check version sync
+        run: bun run check:version
 
       - name: Rust format
         run: cargo fmt --check
@@ -153,4 +155,4 @@ jobs:
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
           fi
-          bun scripts/publish.mjs --artifacts release-artifacts --platform non-windows --provenance
+          bun scripts/publish.mjs --artifacts release-artifacts --platform all --provenance

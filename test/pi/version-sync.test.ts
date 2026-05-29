@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
 const roots: string[] = [];
 const repoRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const syncVersionScript = join(repoRoot, "scripts", "sync-version.mjs");
+const releaseWorkflowPath = join(repoRoot, ".github", "workflows", "release.yml");
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -92,5 +93,17 @@ describe("version sync script", () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stdout).toContain("Version files are in sync: 1.2.3");
+  });
+
+  test("release workflow runs version sync before Rust quality gates continue", () => {
+    const releaseWorkflow = readFileSync(releaseWorkflowPath, "utf8");
+
+    const installDepsIndex = releaseWorkflow.indexOf("- name: Install JS dependencies");
+    const versionSyncIndex = releaseWorkflow.indexOf("- name: Check version sync");
+    const rustFormatIndex = releaseWorkflow.indexOf("- name: Rust format");
+
+    expect(versionSyncIndex).toBeGreaterThan(installDepsIndex);
+    expect(rustFormatIndex).toBeGreaterThan(versionSyncIndex);
+    expect(releaseWorkflow).toContain("run: bun run check:version");
   });
 });
