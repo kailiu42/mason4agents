@@ -274,6 +274,7 @@ function extensionStartUrl(ctx: unknown): string {
   const extension = (ctx as { extension?: { resolvedPath?: unknown; path?: unknown } }).extension;
   const path = typeof extension?.resolvedPath === "string" ? extension.resolvedPath : typeof extension?.path === "string" ? extension.path : "";
   if (path.length === 0) return import.meta.url;
+  if (/^[a-zA-Z]:[\\/]/.test(path)) return pathToFileURL(`/${path.replaceAll("\\", "/")}`).href;
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(path)) return path;
   return pathToFileURL(path).href;
 }
