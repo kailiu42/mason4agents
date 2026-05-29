@@ -28,6 +28,7 @@ export function createPiTools(bridge: CliBridge, toolOptions: PiToolsOptions = {
       const argv = ["list"];
       if (args.installed === true) argv.push("--installed");
       if (args.outdated === true) argv.push("--outdated");
+      if (typeof args.registry === "string" && args.registry.length > 0) argv.push("--registry", args.registry);
       return result(await bridge.run(argv, runOptions));
     }),
     tool("mason_search", "mason search", "Search Mason Registry packages", searchSchema(), async (input, runOptions) => {
@@ -36,6 +37,7 @@ export function createPiTools(bridge: CliBridge, toolOptions: PiToolsOptions = {
       if (typeof args.query === "string" && args.query.length > 0) argv.push(args.query);
       if (typeof args.category === "string" && args.category.length > 0) argv.push("--category", args.category);
       if (typeof args.language === "string" && args.language.length > 0) argv.push("--language", args.language);
+      if (typeof args.registry === "string" && args.registry.length > 0) argv.push("--registry", args.registry);
       return result(await bridge.run(argv, runOptions));
     }),
     tool("mason_install", "mason install", "Install Mason packages", installSchema(), async (input, runOptions) => {
@@ -132,8 +134,8 @@ function validateStringArray(value: unknown, name: string): string[] {
   return value as string[];
 }
 
-function listSchema(): Record<string, unknown> { return Type.Object({ installed: Type.Optional(Type.Boolean()), outdated: Type.Optional(Type.Boolean()) }, { additionalProperties: false }); }
-function searchSchema(): Record<string, unknown> { return Type.Object({ query: Type.Optional(Type.String()), category: Type.Optional(Type.String()), language: Type.Optional(Type.String()) }, { additionalProperties: false }); }
+function listSchema(): Record<string, unknown> { return Type.Object({ installed: Type.Optional(Type.Boolean()), outdated: Type.Optional(Type.Boolean()), registry: Type.Optional(Type.String()) }, { additionalProperties: false }); }
+function searchSchema(): Record<string, unknown> { return Type.Object({ query: Type.Optional(Type.String()), category: Type.Optional(Type.String()), language: Type.Optional(Type.String()), registry: Type.Optional(Type.String()) }, { additionalProperties: false }); }
 function installSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Array(Type.String(), { minItems: 1 }), registry: Type.Optional(Type.String()), allow_build_scripts: Type.Optional(Type.Boolean()) }, { additionalProperties: false, required: ["packages"] }); }
 function uninstallSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Array(Type.String(), { minItems: 1 }) }, { additionalProperties: false, required: ["packages"] }); }
 function updateSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Optional(Type.Array(Type.String())), registry: Type.Optional(Type.String()), allow_build_scripts: Type.Optional(Type.Boolean()) }, { additionalProperties: false }); }

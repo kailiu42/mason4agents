@@ -28,7 +28,10 @@ describe("Pi tools", () => {
       "mason_env"
     ]);
     expect(tools.find((tool) => tool.name === "mason_install")?.parameters).toMatchObject({ type: "object" });
+    expect(tools.find((tool) => tool.name === "mason_list")?.parameters).toMatchObject({ properties: { registry: { type: "string" } } });
+    expect(tools.find((tool) => tool.name === "mason_search")?.parameters).toMatchObject({ properties: { registry: { type: "string" } } });
 
+    await tools.find((tool) => tool.name === "mason_list")!.execute("0", {});
     await tools.find((tool) => tool.name === "mason_search")!.execute("1", { query: "lua", category: "LSP", language: "Lua" });
     await tools.find((tool) => tool.name === "mason_install")!.execute("2", { packages: ["stylua"], registry: "file:///tmp/reg", allow_build_scripts: true });
     await tools.find((tool) => tool.name === "mason_uninstall")!.execute("3", { packages: ["stylua"] });
@@ -37,6 +40,7 @@ describe("Pi tools", () => {
     await tools.find((tool) => tool.name === "mason_env")!.execute("6", { shell: "bash" });
 
     expect(calls).toEqual([
+      ["list"],
       ["search", "lua", "--category", "LSP", "--language", "Lua"],
       ["install", "stylua", "--registry", "file:///tmp/reg", "--allow-build-scripts"],
       ["uninstall", "stylua"],
@@ -45,6 +49,32 @@ describe("Pi tools", () => {
       ["env", "--shell", "bash"]
     ]);
     expect(syncs).toBe(3);
+  });
+
+  test("forwards list and search registry when non-empty", async () => {
+    const { bridge, calls } = fakeBridge();
+    const tools = createPiTools(bridge);
+
+    await tools.find((tool) => tool.name === "mason_list")!.execute("1", { registry: "file:///tmp/registry" });
+    await tools.find((tool) => tool.name === "mason_search")!.execute("2", { query: "lua", registry: "file:///tmp/registry" });
+
+    expect(calls).toEqual([
+      ["list", "--registry", "file:///tmp/registry"],
+      ["search", "lua", "--registry", "file:///tmp/registry"]
+    ]);
+  });
+
+  test("does not forward empty list and search registry", async () => {
+    const { bridge, calls } = fakeBridge();
+    const tools = createPiTools(bridge);
+
+    await tools.find((tool) => tool.name === "mason_list")!.execute("1", { installed: true, registry: "" });
+    await tools.find((tool) => tool.name === "mason_search")!.execute("2", { query: "lua", registry: "" });
+
+    expect(calls).toEqual([
+      ["list", "--installed"],
+      ["search", "lua"]
+    ]);
   });
 
   test("validates required tool inputs", async () => {
