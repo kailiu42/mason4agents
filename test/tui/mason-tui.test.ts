@@ -171,7 +171,8 @@ describe("Mason TUI core", () => {
 
     expect(lines.every((line) => line.length <= 120)).toBe(true);
     expect(row).toBeDefined();
-    expect(row).toContain(timestamp);
+    expect(row).toContain("2026-05-24 12:34:56");
+    expect(row).not.toContain(timestamp);
     expect(header).toBeDefined();
     expect(header!.indexOf("Version") - header!.indexOf("Name")).toBe(32);
     expect(header!.indexOf("Bins") - header!.indexOf("Version")).toBe(22);
@@ -194,8 +195,8 @@ describe("Mason TUI core", () => {
 
     expect(lines.every((line) => line.length <= 96)).toBe(true);
     expect(text).toContain("Installed At");
-    expect(text).toContain("2026-05-24T12:34:56");
-    expect(text).toContain("789123Z");
+    expect(text).toContain("2026-05-24 12:34:56");
+    expect(text).not.toContain("2026-05-24T12:34:56.789123Z");
   });
 
   test("keeps column widths stable while scrolling through different rows", () => {

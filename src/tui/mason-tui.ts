@@ -1,5 +1,5 @@
 import { MasonCommandInputError, tokenizeMasonArgs } from "../mason-args";
-import { errorDisplay, modelForResult, renderDisplay, renderInlineShortcutText, renderShortcutLine, shortcutText, type DisplayModel, type MasonResultKind, type RenderOptions, type RenderStyle, type ShortcutAction } from "./mason-render";
+import { errorDisplay, formatDisplayTimestamp, modelForResult, renderDisplay, renderInlineShortcutText, renderShortcutLine, shortcutText, type DisplayModel, type MasonResultKind, type RenderOptions, type RenderStyle, type ShortcutAction } from "./mason-render";
 
 export type MasonTuiCommandId =
   | "search"
@@ -717,7 +717,7 @@ function renderDetailContentLines(state: MasonTuiState, width: number, style: Ma
     pushDetail(lines, width, "Description", stringValue(item.description) || "-", style);
     pushDetail(lines, width, "Neovim lspconfig", stringValue(item.neovim_lspconfig) || "-", style);
     pushDetail(lines, width, "Bins", keyList(item.bins) || "-", style);
-    pushDetail(lines, width, "Installed at", stringValue(item.installed_at) || "-", style);
+    pushDetail(lines, width, "Installed at", formatDisplayTimestamp(stringValue(item.installed_at)), style);
     pushDetail(lines, width, "Source", stringValue(item.source_id) || "-", style);
     pushDetail(lines, width, "Package dir", stringValue(item.package_dir) || "-", style);
   } else {

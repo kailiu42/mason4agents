@@ -365,7 +365,7 @@ function installedRow(value: unknown): string[] {
     stringValue(value.name) || "<unknown>",
     stringValue(value.version) || "-",
     keyList(value.bins),
-    stringValue(value.installed_at) || "-",
+    formatDisplayTimestamp(stringValue(value.installed_at)),
   ];
 }
 
@@ -749,6 +749,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
+}
+
+export function formatDisplayTimestamp(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "-";
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/.exec(trimmed);
+  if (!match) return trimmed;
+  return `${match[1]} ${match[2]}`;
 }
 
 function stringValue(value: unknown): string {
