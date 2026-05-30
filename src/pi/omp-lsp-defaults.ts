@@ -69,9 +69,8 @@ export function syncOmpLspDefaultsCache(env: NodeJS.ProcessEnv = process.env): O
   }
 
   const cache = buildSuggestionCache(loaded.defaults, loaded.defaultsPath);
-  const bytes = `${JSON.stringify(cache, null, 2)}\n`;
   const previous = existsSync(cachePath) ? readFileSync(cachePath, "utf8") : undefined;
-  if (previous === bytes) {
+  if (previous !== undefined && hasSameStableCacheContent(previous, cache)) {
     return {
       cachePath,
       changed: false,
@@ -80,6 +79,7 @@ export function syncOmpLspDefaultsCache(env: NodeJS.ProcessEnv = process.env): O
     };
   }
 
+  const bytes = `${JSON.stringify(cache, null, 2)}\n`;
   mkdirSync(dirname(cachePath), { recursive: true });
   writeFileSync(cachePath, bytes);
   return {
@@ -144,6 +144,56 @@ function buildSuggestionCache(defaults: Record<string, OmpDefaultServerConfig>, 
     fetched_at: new Date().toISOString(),
     rules,
   };
+}
+
+function hasSameStableCacheContent(previous: string, next: OmpLspSuggestionCache): boolean {
+  try {
+    const parsed = JSON.parse(previous) as unknown;
+    return (
+      isRecord(parsed) &&
+      parsed.schema_version === next.schema_version &&
+      parsed.source === next.source &&
+      parsed.source_ref === next.source_ref &&
+      hasSameRules(parsed.rules, next.rules)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasSameRules(previous: unknown, next: CuratedRule[]): boolean {
+  if (!Array.isArray(previous) || previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index += 1) {
+    const previousRule = previous[index];
+    const nextRule = next[index];
+    if (
+      nextRule === undefined ||
+      !isRecord(previousRule) ||
+      previousRule.signal !== nextRule.signal ||
+      previousRule.reason !== nextRule.reason ||
+      !hasSamePackages(previousRule.packages, nextRule.packages)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasSamePackages(previous: unknown, next: CuratedPackage[]): boolean {
+  if (!Array.isArray(previous) || previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index += 1) {
+    const previousPackage = previous[index];
+    const nextPackage = next[index];
+    if (
+      nextPackage === undefined ||
+      !isRecord(previousPackage) ||
+      previousPackage.package !== nextPackage.package ||
+      previousPackage.capability !== nextPackage.capability
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function resolveOmpPackageDir(env: NodeJS.ProcessEnv): string | undefined {

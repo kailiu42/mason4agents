@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ompBuiltInServerNames, ompLspDefaultsCachePath, syncOmpLspDefaultsCache } from "../../src/pi/omp-lsp-defaults";
@@ -61,6 +61,38 @@ describe("OMP default LSP cache sync", () => {
       { signal: "docker", packages: ["dockerfile-language-server"] },
       { signal: "markdown", packages: ["marksman"] },
     ]);
+  });
+
+  test("does not rewrite cache when only fetched_at would change", async () => {
+    const { env, ompPackageDir } = tempEnv();
+    const defaultsPath = join(ompPackageDir, "src", "lsp", "defaults.json");
+    mkdirSync(dirname(defaultsPath), { recursive: true });
+    writeFileSync(join(ompPackageDir, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }));
+    writeFileSync(defaultsPath, JSON.stringify({
+      "rust-analyzer": { command: "rust-analyzer" },
+      gopls: { command: "gopls" },
+    }));
+
+    const first = syncOmpLspDefaultsCache(env);
+    const cachePath = ompLspDefaultsCachePath(env);
+    const firstContent = readFileSync(cachePath, "utf8");
+    const firstMtime = statSync(cachePath).mtimeMs;
+
+    await Bun.sleep(5);
+
+    const second = syncOmpLspDefaultsCache(env);
+    const secondContent = readFileSync(cachePath, "utf8");
+    const secondMtime = statSync(cachePath).mtimeMs;
+
+    expect(first.changed).toBe(true);
+    expect(second).toMatchObject({
+      cachePath,
+      changed: false,
+      sourcePath: defaultsPath,
+      signals: ["rust", "go"],
+    });
+    expect(secondContent).toBe(firstContent);
+    expect(secondMtime).toBe(firstMtime);
   });
 
   test("returns built-in server names from detected OMP package", () => {
