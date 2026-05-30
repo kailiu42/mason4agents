@@ -1,6 +1,6 @@
 {
   "name": "mason4agents",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Mason Registry powered tool installer for coding agents.",
   "type": "module",
   "license": "MIT",
