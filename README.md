@@ -144,8 +144,9 @@ Use the following tools from OMP/Pi (they call the Rust CLI under the hood):
 | `mason_which` | Resolve an installed binary path |
 | `mason_env` | Generate shell PATH setup |
 
-### All CLI Commands
+### CLI Commands
 
+The npm package/Pi TypeScript shim exposes this command surface. A native Rust binary built directly from source (for example, `target/release/mason4agents`) supports the same commands except `register --omp`, which is implemented by the shim to update OMP/Pi registration.
 ```text
 mason4agents refresh [--registry <url|file>]
 mason4agents search [query] [--category <category>] [--language <lang>] [--registry <url|file>]
@@ -161,7 +162,7 @@ mason4agents register --omp
 ```
 
 By default, all commands output human-readable text. Add `--json` for a final structured JSON envelope wrapped in `{"ok": true, "data": ...}`; for long operations, progress events are written to stderr as NDJSON objects with `kind: "progress"` while stdout remains the final envelope only. Download progress events include `total_bytes`, `downloaded_bytes`, `download_percent`, and `bytes_per_second` when the remote source reports a content length.
-Package-changing commands run through the OMP/Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` to register already-installed Mason LSP tools with oh-my-pi manually.
+Package-changing commands run through the OMP/Pi extension or npm CLI refresh OMP LSP registration after successful installs, updates, and uninstalls. Run `mason4agents register --omp` from the npm package/Pi shim to register already-installed Mason LSP tools with oh-my-pi manually; do not use that subcommand with a native Rust CLI built directly from source.
 
 Example text output:
 

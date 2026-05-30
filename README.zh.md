@@ -143,8 +143,9 @@ OMP/Pi 中可使用以下工具（底层调用 Rust CLI）：
 | `mason_which` | 查找已安装的二进制路径 |
 | `mason_env` | 生成 shell PATH 设置 |
 
-### 全部 CLI 命令
+### CLI 命令
 
+npm package/Pi TypeScript shim 暴露以下命令面。直接从源码构建的 native Rust binary（例如 `target/release/mason4agents`）支持除 `register --omp` 以外的相同命令；`register --omp` 由 shim 实现，用于更新 OMP/Pi 注册。
 ```text
 mason4agents refresh [--registry <url|file>]
 mason4agents search [query] [--category <category>] [--language <lang>] [--registry <url|file>]
@@ -160,7 +161,7 @@ mason4agents register --omp
 ```
 
 默认情况下，所有命令输出人类可读文本。添加 `--json` 可获取最终结构化 JSON envelope，包裹在 `{"ok": true, "data": ...}` 中；耗时操作的 progress event 会以 `kind: "progress"` 的 NDJSON object 写入 stderr，stdout 仍只保留最终 envelope。对于下载阶段，如果远端返回了内容长度，progress event 还会包含 `total_bytes`、`downloaded_bytes`、`download_percent` 和 `bytes_per_second`。
-通过 OMP/Pi 扩展或 npm CLI 执行安装、更新、卸载成功后，会自动刷新 OMP LSP 注册。可运行 `mason4agents register --omp`，手动把已安装的 Mason LSP 工具注册到 oh-my-pi。
+通过 OMP/Pi 扩展或 npm CLI 执行安装、更新、卸载成功后，会自动刷新 OMP LSP 注册。可从 npm package/Pi shim 运行 `mason4agents register --omp`，手动把已安装的 Mason LSP 工具注册到 oh-my-pi；不要在直接从源码构建的 native Rust CLI 上使用该子命令。
 
 示例文本输出：
 
