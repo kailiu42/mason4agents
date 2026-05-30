@@ -666,11 +666,19 @@ export function renderMasonTuiLines(state: MasonTuiState, width: number, style: 
   if (state.notice) lines.push(renderInlineShortcutText(state.notice, safeWidth, style, style.notice));
   const displayLines = renderCurrentDisplay(state, safeWidth, style);
   lines.push(...padDisplayLines(displayLines, safeWidth, PANEL_DISPLAY_MIN_LINES));
-  lines.push(shortcutHelp(state, safeWidth, style));
+  lines.push(modalActive(state) ? fitToWidth("", safeWidth) : shortcutHelp(state, safeWidth, style));
   const fitted = lines.map((line) => fitToWidth(line, safeWidth));
   if (state.progress && !state.progress.dismissed) return renderProgressPopup(state, fitted, safeWidth, style);
   if (state.view === "detail") return renderDetailPopup(state, fitted, safeWidth, style);
   return state.edit && isPickerEdit(state.edit) ? renderPickerPopup(state, fitted, safeWidth, style) : fitted;
+}
+
+function modalActive(state: MasonTuiState): boolean {
+  return (
+    (state.progress !== undefined && !state.progress.dismissed)
+    || state.view === "detail"
+    || (state.edit !== undefined && isPickerEdit(state.edit))
+  );
 }
 
 function padDisplayLines(lines: string[], width: number, minLines: number): string[] {
@@ -926,7 +934,7 @@ function renderPickerPopup(state: MasonTuiState, baseLines: string[], width: num
 
   const filterDraft = edit.filterDraft;
   const filterLine = filterDraft !== undefined
-    ? `│ [/ ${filterDraft}]${" ".repeat(Math.max(0, contentWidth - 5 - (filterDraft ?? "").length))} │`
+    ? `│ ${fitToWidth(`[/ ${filterDraft}]`, contentWidth)} │`
     : undefined;
 
   const helpActions: ShortcutAction[] = filterDraft !== undefined

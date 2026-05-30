@@ -296,6 +296,10 @@ describe("Mason TUI core", () => {
     expect(detail).toContain("[i]: install");
     expect(detail).not.toContain("[u]: update");
     expect(detail).not.toContain("[d]: uninstall");
+    expect(detail).toContain("[q]/[Esc]: back");
+    expect(detail).not.toContain("[Tab/S-Tab/←→]");
+    expect(detail).not.toContain("[/]: name");
+    expect(detail).not.toContain("[Enter]: detail");
     await tui.handleInput("\x1b[27u");
     expect(tui.state.view).toBe("list");
     expect(tui.render()).not.toContain("package details");
@@ -397,11 +401,19 @@ describe("Mason TUI core", () => {
     };
     const tui = createMasonTui(fake, { progressTimeoutMs: 0 });
 
+    await tui.runCurrent();
+    calls.length = 0;
+
     const pending = tui.install(["stylua"]);
-    const progressLines = tui.renderLines(80).map(stripAnsi);
-    expect(progressLines.join("\n")).toContain("operation progress");
-    expect(progressLines.join("\n")).toContain("download");
-    const progressTitleLine = progressLines.find((line) => line.includes("operation progress"));
+    const progressText = tui.renderLines(80).map(stripAnsi).join("\n");
+    expect(progressText).toContain("operation progress");
+    expect(progressText).toContain("download");
+    expect(progressText).toContain("[↑↓/Pg]: scroll");
+    expect(progressText).not.toContain("[Tab/S-Tab/←→]");
+    expect(progressText).not.toContain("[/]: name");
+    expect(progressText).not.toContain("[Enter]: detail");
+    expect(progressText).not.toContain("[i]: install");
+    const progressTitleLine = progressText.split("\n").find((line) => line.includes("operation progress"));
     expect(progressTitleLine?.trim().length).toBe(40);
     await tui.handleInput("down");
     expect(tui.state.selectedIndex).toBe(0);
@@ -897,6 +909,26 @@ describe("Mason TUI core", () => {
     expect(tui.render()).toContain("typescript-language-server");
     expect(tui.render()).not.toContain("lua-language-server");
     expect(calls).toEqual([["list"]]);
+  });
+
+  test("keeps picker filter border intact with long draft text", async () => {
+    const { host: fake } = host();
+    const tui = createMasonTui(fake);
+    await tui.runCurrent();
+
+    await tui.handleInput("l");
+    await tui.handleInput("/");
+    for (const key of "typescript-language-server-filter-draft-that-exceeds-popup-width") {
+      await tui.handleInput(key);
+    }
+
+    const width = 40;
+    const lines = tui.renderLines(width).map(stripAnsi);
+    const filterLine = lines.find((line) => line.includes("│ [/ "));
+
+    expect(lines.every((line) => line.length <= width)).toBe(true);
+    expect(filterLine).toBeDefined();
+    expect(filterLine!.trimEnd().endsWith("│")).toBe(true);
   });
 
   test("matches language and category filters against exact list entries", async () => {
