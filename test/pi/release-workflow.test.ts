@@ -16,4 +16,8 @@ describe("release workflow", () => {
     expect(rustFormatIndex).toBeGreaterThan(versionSyncIndex);
     expect(releaseWorkflow).toContain("run: bun run check:version");
   });
+
+  test("holds Windows native packages from npm publish", () => {
+    expect(releaseWorkflow).toContain("bun scripts/publish.mjs --artifacts release-artifacts --platform non-windows --provenance");
+  });
 });
