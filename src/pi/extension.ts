@@ -270,7 +270,7 @@ function publishMessage(ctx: unknown, customType: string, content: string): bool
   return false;
 }
 
-function extensionStartUrl(ctx: unknown): string {
+export function extensionStartUrl(ctx: unknown): string {
   const extension = (ctx as { extension?: { resolvedPath?: unknown; path?: unknown } }).extension;
   const path = typeof extension?.resolvedPath === "string" ? extension.resolvedPath : typeof extension?.path === "string" ? extension.path : "";
   if (path.length === 0) return import.meta.url;
