@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { modelForResult, renderDisplay } from "../../src/tui/mason-render";
+import { formatDisplayTimestamp, modelForResult, renderDisplay } from "../../src/tui/mason-render";
 import { createMasonTui, MASON_TUI_COMMANDS, type MasonTuiHost } from "../../src/tui/mason-tui";
+
+function localDisplayTimestamp(value: string): string {
+  const date = new Date(value);
+  const pad = (part: number) => part < 10 ? `0${part}` : String(part);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
 function packages() {
   return [
@@ -154,6 +160,13 @@ describe("Mason TUI core", () => {
     expect(continuation!.indexOf("description column without")).toBeGreaterThan(2);
   });
 
+  test("formats installed timestamps with local calendar fields", () => {
+    const timestamp = "2026-05-24T12:34:56.789123Z";
+
+    expect(formatDisplayTimestamp(timestamp)).toBe(localDisplayTimestamp(timestamp));
+    expect(formatDisplayTimestamp(timestamp)).not.toContain("T");
+  });
+
   test("uses requested installed table column widths", () => {
     const timestamp = "2026-05-24T12:34:56.789123Z";
     const model = modelForResult("installed", [
@@ -171,7 +184,7 @@ describe("Mason TUI core", () => {
 
     expect(lines.every((line) => line.length <= 120)).toBe(true);
     expect(row).toBeDefined();
-    expect(row).toContain("2026-05-24 12:34:56");
+    expect(row).toContain(localDisplayTimestamp(timestamp));
     expect(row).not.toContain(timestamp);
     expect(header).toBeDefined();
     expect(header!.indexOf("Version") - header!.indexOf("Name")).toBe(32);
@@ -195,7 +208,7 @@ describe("Mason TUI core", () => {
 
     expect(lines.every((line) => line.length <= 96)).toBe(true);
     expect(text).toContain("Installed At");
-    expect(text).toContain("2026-05-24 12:34:56");
+    expect(text).toContain(localDisplayTimestamp(timestamp));
     expect(text).not.toContain("2026-05-24T12:34:56.789123Z");
   });
 

@@ -754,9 +754,14 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 export function formatDisplayTimestamp(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length === 0) return "-";
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/.exec(trimmed);
-  if (!match) return trimmed;
-  return `${match[1]} ${match[2]}`;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/.test(trimmed)) return trimmed;
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return trimmed;
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}:${padDatePart(date.getSeconds())}`;
+}
+
+function padDatePart(value: number): string {
+  return value < 10 ? `0${value}` : String(value);
 }
 
 function stringValue(value: unknown): string {
