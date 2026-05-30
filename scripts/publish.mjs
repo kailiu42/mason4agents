@@ -4,6 +4,7 @@ import {
   accessSync,
   chmodSync,
   constants,
+  cpSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -12,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -273,14 +274,39 @@ function verifyPackIncludes(stagedPackage, forbiddenPrefixes = []) {
 function packStagedPackages(staged, tarballDir) {
   rmSync(tarballDir, { recursive: true, force: true });
   mkdirSync(tarballDir, { recursive: true });
-  for (const stagedPackage of [...staged.native, staged.rootPackage]) {
-    const output = capture("npm", ["pack", "--json", "--pack-destination", tarballDir], stagedPackage.packageDir);
-    const packs = parseNpmJson(output, "npm pack --json");
-    for (const pack of packs) {
-      console.log(`Packed ${stagedPackage.name}: ${pack.filename ?? pack.name}`);
-    }
+
+  for (const stagedPackage of staged.native) {
+    packPackage(stagedPackage, tarballDir);
   }
+
+  bundleLocalNativePackages(staged.rootPackage, staged.native);
+  packPackage(staged.rootPackage, tarballDir);
   console.log(`Tarballs written to ${tarballDir}`);
+}
+
+function packPackage(stagedPackage, tarballDir) {
+  const output = capture("npm", ["pack", "--json", "--pack-destination", tarballDir], stagedPackage.packageDir);
+  const packs = parseNpmJson(output, "npm pack --json");
+  if (packs.length !== 1) fail(`${stagedPackage.name} npm pack returned ${packs.length} package records.`);
+  const filename = packs[0]?.filename;
+  if (typeof filename !== "string" || filename.length === 0) fail(`${stagedPackage.name} npm pack did not report a tarball filename.`);
+  const tarball = basename(filename);
+  console.log(`Packed ${stagedPackage.name}: ${tarball}`);
+  return tarball;
+}
+
+function bundleLocalNativePackages(rootPackage, nativePackages) {
+  const manifestPath = join(rootPackage.packageDir, "package.json");
+  const manifest = readJson(manifestPath);
+  const nodeModulesDir = join(rootPackage.packageDir, "node_modules");
+  mkdirSync(nodeModulesDir, { recursive: true });
+  const bundledDependencies = [];
+  for (const stagedPackage of nativePackages) {
+    cpSync(stagedPackage.packageDir, join(nodeModulesDir, stagedPackage.name), { recursive: true });
+    bundledDependencies.push(stagedPackage.name);
+  }
+  manifest.bundledDependencies = bundledDependencies;
+  writeJson(manifestPath, manifest);
 }
 
 export function npmPublishArgs(packageDir, { dryRun, provenance }) {

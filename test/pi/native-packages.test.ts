@@ -73,6 +73,16 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
 
+function versionOptionalDependencies(packages: readonly { name: string }[]): Record<string, string> {
+  return Object.fromEntries(packages.map((nativePackage) => [nativePackage.name, "9.8.7"]));
+}
+
+function currentNativePackage(): (typeof nativePackages)[number] | undefined {
+  const cpu = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
+  if (process.platform === "linux") return nativePackages.find((nativePackage) => nativePackage.name === `mason4agents-linux-${cpu}-gnu`);
+  return nativePackages.find((nativePackage) => nativePackage.os === process.platform && nativePackage.cpu === cpu);
+}
+
 function writeFakeNpm(root: string): { fakeBin: string; logPath: string } {
   const fakeBin = join(root, "bin");
   const logPath = join(root, "npm.log");
@@ -135,7 +145,8 @@ describe("native npm package staging", () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const rootManifest = readJson(join(outDir, "staging", "mason4agents", "package.json"));
-    expect(rootManifest.optionalDependencies).toEqual(Object.fromEntries(nativePackages.map((nativePackage) => [nativePackage.name, "9.8.7"])));
+    expect(rootManifest.optionalDependencies).toEqual(versionOptionalDependencies(nativePackages));
+    expect(rootManifest.bundledDependencies).toEqual(nativePackages.map((nativePackage) => nativePackage.name));
 
     const linuxManifest = readJson(join(outDir, "staging", "mason4agents-linux-x64-gnu", "package.json"));
     expect(linuxManifest).toMatchObject({
@@ -160,6 +171,18 @@ describe("native npm package staging", () => {
     expect(tarballs).toContain("mason4agents-9.8.7.tgz");
     expect(tarballs).toContain("mason4agents-linux-x64-gnu-9.8.7.tgz");
     expect(tarballs).toContain("mason4agents-win32-x64-9.8.7.tgz");
+
+    const currentNative = currentNativePackage();
+    if (currentNative) {
+      const installRoot = tempRoot();
+      const installResult = spawnSync(process.execPath, ["add", join(outDir, "tarballs", "mason4agents-9.8.7.tgz"), "--ignore-scripts"], {
+        cwd: installRoot,
+        encoding: "utf8",
+        env: publishTestEnv(),
+      });
+      expect(installResult.status, `${installResult.stdout}\n${installResult.stderr}`).toBe(0);
+      expect(existsSync(join(installRoot, "node_modules", "mason4agents", "node_modules", currentNative.name, "package.json"))).toBe(true);
+    }
   }, 30_000);
 
   test("stages only Linux and macOS packages for non-windows publish", () => {
@@ -176,7 +199,8 @@ describe("native npm package staging", () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
 
     const rootManifest = readJson(join(outDir, "staging", "mason4agents", "package.json"));
-    expect(rootManifest.optionalDependencies).toEqual(Object.fromEntries(nativePackages.slice(0, 4).map((nativePackage) => [nativePackage.name, "9.8.7"])));
+    expect(rootManifest.optionalDependencies).toEqual(versionOptionalDependencies(nativePackages.slice(0, 4)));
+    expect(rootManifest.bundledDependencies).toEqual(nativePackages.slice(0, 4).map((nativePackage) => nativePackage.name));
 
     const tarballs = readdirSync(join(outDir, "tarballs"));
     expect(tarballs).toContain("mason4agents-linux-x64-gnu-9.8.7.tgz");
@@ -202,6 +226,10 @@ describe("native npm package staging", () => {
       },
     });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+
+    const rootManifest = readJson(join(outDir, "staging", "mason4agents", "package.json"));
+    expect(rootManifest.optionalDependencies).toEqual(versionOptionalDependencies(nativePackages));
+    expect(rootManifest.bundledDependencies).toBeUndefined();
 
     const publishArgs = loggedNpmArgs(logPath).filter((args) => args[0] === "publish");
     expect(publishArgs).toHaveLength(7);
