@@ -84,11 +84,3 @@ updating recap content, place entries under exactly these three top-level
 headings: `Problems & Solutions`, `Valuable Findings`, and `Things To Avoid`.
 Merge related or repeated lessons into the existing bullets instead of adding a
 new session section.
-
-## Additional instructions
-
-Refers to ./.coding-agent-instructions/index.md for additional instructions.
-
-Don't read all the instructions at once. Instead read the index.md first, and
-refer to the links to each detail instructions only when necessary. Use the
-yaml heading for meta information of each markdown file.
