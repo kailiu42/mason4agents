@@ -17,7 +17,8 @@ describe("release workflow", () => {
     expect(releaseWorkflow).toContain("run: bun run check:version");
   });
 
-  test("holds Windows native packages from npm publish", () => {
-    expect(releaseWorkflow).toContain("bun scripts/publish.mjs --artifacts release-artifacts --platform non-windows --provenance");
+  test("publishes every staged native package", () => {
+    expect(releaseWorkflow).toContain("bun scripts/publish.mjs --artifacts release-artifacts --provenance");
+    expect(releaseWorkflow).not.toContain("--platform non-windows");
   });
 });

@@ -155,4 +155,4 @@ jobs:
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
           fi
-          bun scripts/publish.mjs --artifacts release-artifacts --platform non-windows --provenance
+          bun scripts/publish.mjs --artifacts release-artifacts --provenance
