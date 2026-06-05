@@ -1,3 +1,4 @@
+.instructions/
 *.log
 .DS_Store
 mason4agents-*.tgz
