@@ -1,12 +1,14 @@
 import { createCliBridge } from "./cli";
 import type { CliBridge } from "./cli";
-import { executeMasonCommand, parseMasonCommandInput } from "./mason-command";
-import { openMasonPanel, type MasonPanelInitialCommand } from "./mason-panel";
-import { modelSupportsFiltering, renderDisplay, renderDisplayText, type DisplayModel } from "./mason-render";
+import type * as MasonCommandModule from "./mason-command";
+import type { ParsedMasonInput } from "./mason-command";
+import type * as MasonLspConfigModule from "./lsp-config";
+import type * as MasonPanelModule from "./mason-panel";
+import type { MasonPanelInitialCommand } from "./mason-panel";
+import type * as MasonRenderModule from "./mason-render";
+import type * as OmpLspDefaultsModule from "./omp-lsp-defaults";
 import { registerPiTools } from "./pi-tools";
 import { ensureMasonBinOnPath } from "./path-env";
-import { syncMasonLspConfig } from "./lsp-config";
-import { syncOmpLspDefaultsCache } from "./omp-lsp-defaults";
 import { pathToFileURL } from "node:url";
 
 export interface PiActivationResult {
@@ -17,14 +19,10 @@ export interface PiActivationResult {
 
 export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActivationResult> {
   const pathInfo = ensureMasonBinOnPath();
-  syncOmpLspDefaultsCache();
-  syncMasonLspConfig();
+  scheduleBackgroundLspStartupSync(process.env);
   const apiCtx = ctx;
   const cliBridge = bridge ?? createCliBridge(undefined, extensionStartUrl(ctx));
-  const syncAfterPackageChange = () => {
-    syncOmpLspDefaultsCache();
-    syncMasonLspConfig();
-  };
+  const syncAfterPackageChange = () => syncOmpAndMasonLspConfig(process.env);
   let activeLongOperation: Promise<void> | undefined;
   const trackLongOperation = (promise: Promise<unknown>) => {
     const tracked = promise.then(
@@ -46,6 +44,7 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
         const input = typeof args === "string" ? args.trim() : "";
         const shownInUi = canShowCustomUi(commandCtx);
         if (input.length === 0) {
+          const { openMasonPanel } = await loadMasonPanelModule();
           const panel = await openMasonPanel(commandCtx, cliBridge, { syncLspConfig: syncAfterPackageChange, onLongOperationStart: trackLongOperation });
           if (!shownInUi) {
             publishMessage(apiCtx, "mason4agents", panel.render());
@@ -53,12 +52,14 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
           return;
         }
 
-        const initialCommand = directLongMasonCommand(input);
-        if (shownInUi && initialCommand) {
+        if (shownInUi) {
+          const initialCommand = await directLongMasonCommand(input);
+          if (initialCommand) {
           if (activeLongOperation) {
             reportLongOperationBlocked(commandCtx, apiCtx);
             return;
           }
+            const { openMasonPanel } = await loadMasonPanelModule();
           await openMasonPanel(commandCtx, cliBridge, {
             syncLspConfig: syncAfterPackageChange,
             initialCommand,
@@ -66,10 +67,15 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
           });
           return;
         }
+        }
 
+        const [{ executeMasonCommand }, { renderDisplayText }] = await Promise.all([
+          loadMasonCommandModule(),
+          loadMasonRenderModule(),
+        ]);
         const model = await executeMasonCommand(input, cliBridge);
-        if (model.kind !== "error" && shouldSyncLspConfigAfterMasonCommand(input)) {
-          syncAfterPackageChange();
+        if (model.kind !== "error" && await shouldSyncLspConfigAfterMasonCommand(input)) {
+          await syncAfterPackageChange();
         }
         publishMessage(apiCtx, "mason4agents", renderDisplayText(model));
       } catch (err) {
@@ -80,13 +86,115 @@ export async function activate(ctx: unknown, bridge?: CliBridge): Promise<PiActi
     },
   });
 
-  const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: syncMasonLspConfig });
+  const tools = registerPiTools(ctx, cliBridge, { syncLspConfig: () => syncMasonLspConfigLazy(process.env) });
   registerSessionStart(ctx, () => {
     ensureMasonBinOnPath();
-    syncOmpLspDefaultsCache();
-    syncMasonLspConfig();
+    scheduleBackgroundLspStartupSync(process.env);
   });
   return { name: "mason4agents", binDir: pathInfo.binDir, tools };
+}
+
+let masonCommandModule: Promise<typeof MasonCommandModule> | undefined;
+let masonPanelModule: Promise<typeof MasonPanelModule> | undefined;
+let masonRenderModule: Promise<typeof MasonRenderModule> | undefined;
+let masonLspConfigModule: Promise<typeof MasonLspConfigModule> | undefined;
+let ompLspDefaultsModule: Promise<typeof OmpLspDefaultsModule> | undefined;
+
+function loadMasonCommandModule(): Promise<typeof MasonCommandModule> {
+  return masonCommandModule ??= import("./mason-command");
+}
+
+function loadMasonPanelModule(): Promise<typeof MasonPanelModule> {
+  return masonPanelModule ??= import("./mason-panel");
+}
+
+function loadMasonRenderModule(): Promise<typeof MasonRenderModule> {
+  return masonRenderModule ??= import("./mason-render");
+}
+
+function loadMasonLspConfigModule(): Promise<typeof MasonLspConfigModule> {
+  return masonLspConfigModule ??= import("./lsp-config");
+}
+
+function loadOmpLspDefaultsModule(): Promise<typeof OmpLspDefaultsModule> {
+  return ompLspDefaultsModule ??= import("./omp-lsp-defaults");
+}
+
+const BACKGROUND_LSP_STARTUP_SYNC_DELAY_MS = 1_000;
+
+let backgroundLspStartupSync: Promise<void> | undefined;
+let backgroundLspStartupSyncTimer: ReturnType<typeof setTimeout> | undefined;
+let runPendingBackgroundLspStartupSync: (() => void) | undefined;
+
+function scheduleBackgroundLspStartupSync(env: NodeJS.ProcessEnv): void {
+  if (backgroundLspStartupSync !== undefined) return;
+  const envSnapshot = { ...env };
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const run = () => {
+    backgroundLspStartupSyncTimer = undefined;
+    runPendingBackgroundLspStartupSync = undefined;
+    void runLspStartupSync(envSnapshot).finally(() => {
+      backgroundLspStartupSync = undefined;
+      resolve();
+    });
+  };
+  runPendingBackgroundLspStartupSync = run;
+  backgroundLspStartupSyncTimer = setTimeout(run, BACKGROUND_LSP_STARTUP_SYNC_DELAY_MS);
+  backgroundLspStartupSync = promise;
+}
+
+async function runLspStartupSync(env: NodeJS.ProcessEnv): Promise<void> {
+  const [defaults, lsp] = await Promise.allSettled([
+    loadOmpLspDefaultsModule(),
+    loadMasonLspConfigModule(),
+  ]);
+  if (defaults.status === "fulfilled") {
+    runLspStartupSyncStep("syncOmpLspDefaultsCache", () => defaults.value.syncOmpLspDefaultsCache(env));
+  } else {
+    reportBackgroundLspStartupSyncFailure("loadOmpLspDefaultsModule", defaults.reason);
+  }
+  if (lsp.status === "fulfilled") {
+    runLspStartupSyncStep("syncMasonLspConfig", () => lsp.value.syncMasonLspConfig(env));
+  } else {
+    reportBackgroundLspStartupSyncFailure("loadMasonLspConfigModule", lsp.reason);
+  }
+}
+
+async function syncOmpAndMasonLspConfig(env: NodeJS.ProcessEnv): Promise<void> {
+  const [defaults, lsp] = await Promise.all([
+    loadOmpLspDefaultsModule(),
+    loadMasonLspConfigModule(),
+  ]);
+  defaults.syncOmpLspDefaultsCache(env);
+  lsp.syncMasonLspConfig(env);
+}
+
+async function syncMasonLspConfigLazy(env: NodeJS.ProcessEnv): Promise<void> {
+  const { syncMasonLspConfig } = await loadMasonLspConfigModule();
+  syncMasonLspConfig(env);
+}
+
+function runLspStartupSyncStep(name: string, step: () => unknown): void {
+  try {
+    step();
+  } catch (err) {
+    reportBackgroundLspStartupSyncFailure(name, err);
+  }
+}
+
+function reportBackgroundLspStartupSyncFailure(name: string, err: unknown): void {
+  console.error(`[mason4agents] background ${name} failed`, err);
+}
+
+export async function flushBackgroundLspStartupSyncForTests(): Promise<void> {
+  const pending = backgroundLspStartupSync;
+  if (pending === undefined) return;
+  if (backgroundLspStartupSyncTimer !== undefined) {
+    clearTimeout(backgroundLspStartupSyncTimer);
+    backgroundLspStartupSyncTimer = undefined;
+  }
+  runPendingBackgroundLspStartupSync?.();
+  await pending;
 }
 
 export default activate;
@@ -224,41 +332,6 @@ function suppressLocalCommandWorking(ctx: unknown): () => void {
   };
 }
 
-async function showDisplayPanel(ctx: unknown, model: DisplayModel): Promise<void> {
-  const anyCtx = ctx as { ui?: { custom?: (factory: Function) => unknown } };
-  await anyCtx.ui?.custom?.((tui: unknown, _theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {
-    const state = { filter: "", filterDraft: "", editingFilter: false, scroll: 0 };
-    return {
-      render(width: number) {
-        return renderDisplayPanel(model, state, width);
-      },
-      handleInput(key: string) {
-        if (state.editingFilter) {
-          handleFilterInput(state, key);
-          requestTuiRender(tui);
-          return;
-        }
-        if (isCloseKey(key)) {
-          done(undefined);
-          return;
-        }
-        if (key === "/" && modelSupportsFiltering(model)) {
-          state.filterDraft = state.filter;
-          state.editingFilter = true;
-          requestTuiRender(tui);
-          return;
-        }
-        if (isScrollDownKey(key)) state.scroll += 1;
-        if (isScrollUpKey(key)) state.scroll = Math.max(0, state.scroll - 1);
-        if (isPageDownKey(key)) state.scroll += 10;
-        if (isPageUpKey(key)) state.scroll = Math.max(0, state.scroll - 10);
-        requestTuiRender(tui);
-      },
-      invalidate() {},
-    };
-  });
-}
-
 function publishMessage(ctx: unknown, customType: string, content: string): boolean {
   const anyCtx = ctx as {
     sendMessage?: (message: unknown, options?: unknown) => unknown;
@@ -289,10 +362,10 @@ function reportCommandError(commandCtx: unknown, apiCtx: unknown, command: strin
   }
 }
 
-function directLongMasonCommand(input: string): MasonPanelInitialCommand | undefined {
-  let parsed: ReturnType<typeof parseMasonCommandInput>;
+async function directLongMasonCommand(input: string): Promise<MasonPanelInitialCommand | undefined> {
+  let parsed: ParsedMasonInput;
   try {
-    parsed = parseMasonCommandInput(input);
+    parsed = (await loadMasonCommandModule()).parseMasonCommandInput(input);
   } catch {
     return undefined;
   }
@@ -333,75 +406,13 @@ function reportLongOperationBlocked(commandCtx: unknown, apiCtx: unknown): void 
     publishMessage(apiCtx, "mason4agents", message);
   }
 }
-function shouldSyncLspConfigAfterMasonCommand(input: string): boolean {
+
+async function shouldSyncLspConfigAfterMasonCommand(input: string): Promise<boolean> {
   try {
-    const parsed = parseMasonCommandInput(input);
+    const parsed = (await loadMasonCommandModule()).parseMasonCommandInput(input);
     return parsed.kind === "command" && (parsed.command === "install" || parsed.command === "update" || parsed.command === "uninstall");
   } catch {
     return false;
-  }
-}
-
-function renderDisplayPanel(model: DisplayModel, state: { filter: string; filterDraft: string; editingFilter: boolean; scroll: number }, width: number): string[] {
-  const safeWidth = Math.max(1, Math.floor(width));
-  const lines = renderDisplay(model, { width: safeWidth, filter: state.filter, scroll: state.scroll, fixedHeight: true });
-  if (state.editingFilter) {
-    lines.splice(1, 0, truncateToWidth(`filter> ${state.filterDraft}`, safeWidth));
-  }
-  return lines.map((line) => truncateToWidth(line, safeWidth));
-}
-
-function handleFilterInput(state: { filter: string; filterDraft: string; editingFilter: boolean; scroll: number }, key: string): void {
-  if (key === "\r" || key === "\n" || key === "enter" || key === "return") {
-    state.filter = state.filterDraft.trim();
-    state.scroll = 0;
-    state.editingFilter = false;
-    return;
-  }
-  if (key === "\x1b" || key === "escape" || key === "esc") {
-    state.editingFilter = false;
-    return;
-  }
-  if (key === "\b" || key === "\x7f" || key === "backspace") {
-    state.filterDraft = state.filterDraft.slice(0, -1);
-    return;
-  }
-  if (key.length === 1 && key >= " ") state.filterDraft += key;
-}
-
-function truncateToWidth(value: string, width: number): string {
-  if (value.length <= width) return value;
-  if (width <= 1) return value.slice(0, width);
-  return `${value.slice(0, width - 1)}…`;
-}
-
-function isCloseKey(key: string): boolean {
-  return key === "q" || key === "\x03" || key === "ctrl+c" || key === "ctrl-c" || key === "\x1b" || key === "escape" || key === "esc";
-}
-
-function isScrollDownKey(key: string): boolean {
-  return key === "down" || key === "j" || key === "\x1b[B";
-}
-
-function isScrollUpKey(key: string): boolean {
-  return key === "up" || key === "k" || key === "\x1b[A";
-}
-
-function isPageDownKey(key: string): boolean {
-  return key === "pagedown" || key === "\x1b[6~";
-}
-
-function isPageUpKey(key: string): boolean {
-  return key === "pageup" || key === "\x1b[5~";
-}
-
-function requestTuiRender(tui: unknown): void {
-  if (typeof tui !== "object" || tui === null) return;
-  const candidate = tui as { requestRender?: (force?: boolean) => unknown; invalidate?: () => unknown };
-  if (typeof candidate.requestRender === "function") {
-    candidate.requestRender(true);
-  } else if (typeof candidate.invalidate === "function") {
-    candidate.invalidate();
   }
 }
 

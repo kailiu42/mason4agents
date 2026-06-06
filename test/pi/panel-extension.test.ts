@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { CliBridge } from "../../src/pi/cli";
-import { activate } from "../../src/pi/extension";
+import { activate, flushBackgroundLspStartupSyncForTests } from "../../src/pi/extension";
 import { createMasonPanel, openMasonPanel } from "../../src/pi/mason-panel";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const roots: string[] = [];
-afterEach(() => {
+afterEach(async () => {
+   await flushBackgroundLspStartupSyncForTests();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -346,6 +347,45 @@ describe("Mason panel", () => {
 });
 
 describe("Pi extension", () => {
+   test("runs startup LSP sync in the background without blocking activation", async () => {
+      const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
+      roots.push(root);
+      const oldHome = process.env.HOME;
+      const oldData = process.env.MASON4AGENTS_DATA_HOME;
+      const oldPath = process.env.PATH;
+      process.env.HOME = root;
+      process.env.MASON4AGENTS_DATA_HOME = join(root, "data");
+      process.env.PATH = "/usr/bin";
+      const binDir = join(root, "data", "mason4agents", "bin");
+      const lspPath = join(root, ".omp", "agent", "lsp.json");
+      mkdirSync(binDir, { recursive: true });
+      writeFileSync(join(binDir, "rust-analyzer"), "");
+      const commands: string[] = [];
+      const tools: string[] = [];
+      const events: string[] = [];
+      const ctx = {
+         commands: { registerCommand(name: string) { commands.push(name); } },
+         tools: { registerTool(definition: { name: string }) { tools.push(definition.name); } },
+         events: { on(name: string) { events.push(name); } },
+      };
+      try {
+         const { bridge: fake } = bridge();
+         const result = await activate(ctx, fake);
+         expect(result.name).toBe("mason4agents");
+         expect(commands).toEqual(["mason"]);
+         expect(tools).toContain("mason_install");
+         expect(events).toEqual(["session_start"]);
+         expect(existsSync(lspPath)).toBe(false);
+
+         await flushBackgroundLspStartupSyncForTests();
+         expect(JSON.parse(readFileSync(lspPath, "utf8")).servers?.["rust-analyzer"]?.command).toBe(join(binDir, "rust-analyzer"));
+      } finally {
+         process.env.HOME = oldHome;
+         if (oldData === undefined) delete process.env.MASON4AGENTS_DATA_HOME; else process.env.MASON4AGENTS_DATA_HOME = oldData;
+         process.env.PATH = oldPath;
+      }
+   });
+
   test("registers commands, tools, session_start, and injects PATH", async () => {
     const root = mkdtempSync(join(tmpdir(), "m4a-ext-"));
     roots.push(root);

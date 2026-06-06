@@ -1,4 +1,3 @@
-import { Type } from "@sinclair/typebox";
 import type { CliBridge } from "./cli";
 
 export interface PiToolDefinition {
@@ -18,7 +17,7 @@ export interface PiToolResult {
 type ToolExecutor = (input: unknown, options?: { signal?: AbortSignal }) => Promise<PiToolResult>;
 
 export interface PiToolsOptions {
-  syncLspConfig?: () => unknown;
+   syncLspConfig?: () => unknown | Promise<unknown>;
 }
 
 export function createPiTools(bridge: CliBridge, toolOptions: PiToolsOptions = {}): PiToolDefinition[] {
@@ -115,9 +114,9 @@ function result(details: unknown): PiToolResult {
   return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
 }
 
-async function runAndSync(bridge: CliBridge, argv: string[], options: { signal?: AbortSignal } | undefined, syncLspConfig: (() => unknown) | undefined): Promise<unknown> {
+async function runAndSync(bridge: CliBridge, argv: string[], options: { signal?: AbortSignal } | undefined, syncLspConfig: (() => unknown | Promise<unknown>) | undefined): Promise<unknown> {
   const details = await bridge.run(argv, options);
-  syncLspConfig?.();
+   await syncLspConfig?.();
   return details;
 }
 
@@ -141,10 +140,18 @@ function validateStringArray(value: unknown, name: string): string[] {
   return value as string[];
 }
 
-function listSchema(): Record<string, unknown> { return Type.Object({ installed: Type.Optional(Type.Boolean()), outdated: Type.Optional(Type.Boolean()), registry: Type.Optional(Type.String()) }, { additionalProperties: false }); }
-function searchSchema(): Record<string, unknown> { return Type.Object({ query: Type.Optional(Type.String()), category: Type.Optional(Type.String()), language: Type.Optional(Type.String()), registry: Type.Optional(Type.String()) }, { additionalProperties: false }); }
-function installSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Array(Type.String(), { minItems: 1 }), registry: Type.Optional(Type.String()), allow_build_scripts: Type.Optional(Type.Boolean()) }, { additionalProperties: false, required: ["packages"] }); }
-function uninstallSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Array(Type.String(), { minItems: 1 }) }, { additionalProperties: false, required: ["packages"] }); }
-function updateSchema(): Record<string, unknown> { return Type.Object({ packages: Type.Optional(Type.Array(Type.String())), registry: Type.Optional(Type.String()), allow_build_scripts: Type.Optional(Type.Boolean()) }, { additionalProperties: false }); }
-function whichSchema(): Record<string, unknown> { return Type.Object({ executable: Type.String() }, { additionalProperties: false, required: ["executable"] }); }
-function envSchema(): Record<string, unknown> { return Type.Object({ shell: Type.Optional(Type.Union([Type.Literal("bash"), Type.Literal("zsh"), Type.Literal("fish"), Type.Literal("powershell"), Type.Literal("cmd"), Type.Literal("json")])) }, { additionalProperties: false }); }
+function objectSchema(properties: Record<string, unknown>, required?: string[]): Record<string, unknown> {
+   return required === undefined
+      ? { type: "object", properties, additionalProperties: false }
+      : { type: "object", properties, required, additionalProperties: false };
+}
+function stringSchema(): Record<string, unknown> { return { type: "string" }; }
+function booleanSchema(): Record<string, unknown> { return { type: "boolean" }; }
+function stringArraySchema(options: Record<string, unknown> = {}): Record<string, unknown> { return { type: "array", items: stringSchema(), ...options }; }
+function listSchema(): Record<string, unknown> { return objectSchema({ installed: booleanSchema(), outdated: booleanSchema(), registry: stringSchema() }); }
+function searchSchema(): Record<string, unknown> { return objectSchema({ query: stringSchema(), category: stringSchema(), language: stringSchema(), registry: stringSchema() }); }
+function installSchema(): Record<string, unknown> { return objectSchema({ packages: stringArraySchema({ minItems: 1 }), registry: stringSchema(), allow_build_scripts: booleanSchema() }, ["packages"]); }
+function uninstallSchema(): Record<string, unknown> { return objectSchema({ packages: stringArraySchema({ minItems: 1 }) }, ["packages"]); }
+function updateSchema(): Record<string, unknown> { return objectSchema({ packages: stringArraySchema(), registry: stringSchema(), allow_build_scripts: booleanSchema() }); }
+function whichSchema(): Record<string, unknown> { return objectSchema({ executable: stringSchema() }, ["executable"]); }
+function envSchema(): Record<string, unknown> { return objectSchema({ shell: { enum: ["bash", "zsh", "fish", "powershell", "cmd", "json"] } }); }

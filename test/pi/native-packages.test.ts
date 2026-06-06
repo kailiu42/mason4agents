@@ -46,7 +46,6 @@ function writeRootPackage(root: string): void {
     keywords: ["pi-package"],
     omp: { extensions: ["dist/pi/extension.js"] },
     pi: { extensions: ["dist/pi/extension.js"] },
-    dependencies: { "@sinclair/typebox": "^0.34.49" },
   }, null, 2));
 }
 

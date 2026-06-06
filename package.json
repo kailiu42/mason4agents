@@ -49,8 +49,5 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "latest"
-  },
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.49"
   }
 }

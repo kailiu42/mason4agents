@@ -498,6 +498,47 @@ describe("Mason TUI core", () => {
     resolveRefreshedList(packages());
     await pending;
   });
+  test("waits for async package sync before refreshing after install", async () => {
+    const { promise: syncPromise, resolve: resolveSync } = Promise.withResolvers<void>();
+    let syncStarted = false;
+    let listCalls = 0;
+    const fake: MasonTuiHost = {
+      runCli(args) {
+        if (args[0] === "install") {
+          return Promise.resolve([
+            {
+              package: "stylua",
+              version: "v2.0.0",
+              source_id: "pkg:generic/acme/stylua@v2.0.0",
+              bins: {},
+              package_dir: "/tmp/stylua",
+            },
+          ]);
+        }
+        if (args[0] === "list") {
+          listCalls += 1;
+          return Promise.resolve(packages());
+        }
+        return Promise.resolve({ args });
+      },
+      syncAfterPackageChange() {
+        syncStarted = true;
+        return syncPromise;
+      },
+    };
+    const tui = createMasonTui(fake);
+
+    const pending = tui.install(["stylua"]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(syncStarted).toBe(true);
+    expect(listCalls).toBe(0);
+
+    resolveSync();
+    await pending;
+    expect(listCalls).toBe(1);
+  });
+
   test("ignores stale post-package refresh after tab changes", async () => {
     const pending: Array<{ args: string[]; resolve: (value: unknown) => void }> = [];
     const fake: MasonTuiHost = {

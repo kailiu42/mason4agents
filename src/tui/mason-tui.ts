@@ -91,7 +91,7 @@ export interface MasonTuiState {
 
 export interface MasonTuiHost {
   runCli(args: string[], options?: MasonTuiRunOptions): Promise<unknown>;
-  syncAfterPackageChange?: () => unknown;
+  syncAfterPackageChange?: () => unknown | Promise<unknown>;
   notify?: (message: string, level?: "info" | "error") => unknown;
 }
 
@@ -212,7 +212,10 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
       const data = await host.runCli(planned.argv);
       if (!isCurrentCommandRun(runId)) return state;
       state.lastAction = data;
-      if (planned.syncAfterPackageChange) host.syncAfterPackageChange?.();
+      if (planned.syncAfterPackageChange) {
+        const syncPromise = waitForMaybePromise(host.syncAfterPackageChange?.());
+        if (syncPromise) await syncPromise;
+      }
       state.model = modelForResult(planned.resultKind, data, planned.title);
       updateTableData(state, planned.resultKind, data);
       if (preservePackage !== undefined) state.selectedPackage = preservePackage;
@@ -247,7 +250,10 @@ export function createMasonTui(host: MasonTuiHost, options: MasonTuiOptions = {}
       });
       if (!isCurrentCommandRun(runId)) return state;
       state.lastAction = data;
-      if (planned.syncAfterPackageChange) host.syncAfterPackageChange?.();
+      if (planned.syncAfterPackageChange) {
+        const syncPromise = waitForMaybePromise(host.syncAfterPackageChange?.());
+        if (syncPromise) await syncPromise;
+      }
       const finalModel = modelForResult(planned.resultKind, data, planned.title);
       completeProgress(progress, finalModel, false);
       if (preservePackage !== undefined) state.selectedPackage = preservePackage;
@@ -1455,6 +1461,10 @@ function isSameRefreshContext(state: MasonTuiState, context: MasonTuiRefreshCont
     if (state.inputs[command] !== context.inputs[command]) return false;
   }
   return true;
+}
+
+function waitForMaybePromise(value: unknown | Promise<unknown>): Promise<unknown> | undefined {
+  return typeof (value as { then?: unknown } | undefined)?.then === "function" ? value as Promise<unknown> : undefined;
 }
 
 function setNotice(state: MasonTuiState, host: MasonTuiHost, message: string, level: "info" | "error"): void {

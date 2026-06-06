@@ -14,7 +14,7 @@ export interface MasonPanelInitialCommand {
 }
 
 export interface MasonPanelOptions {
-   syncLspConfig?: () => unknown;
+   syncLspConfig?: () => unknown | Promise<unknown>;
    notify?: (message: string, level?: "info" | "error") => unknown;
    requestRender?: () => unknown;
    onLongOperationStart?: (promise: Promise<unknown>) => unknown;
