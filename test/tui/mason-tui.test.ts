@@ -126,6 +126,7 @@ describe("Mason TUI core", () => {
 
     expect(narrow.every((line) => line.length <= 32)).toBe(true);
     expect(wide.every((line) => line.length <= 96)).toBe(true);
+    expect(wide[0]).toMatch(/^mason4agents package manager v\d+\.\d+\.\d+/);
     expect(narrow.join("\n")).toContain("▶ stylua");
     expect(wide.join("\n")).toContain("Description");
     expect(wide.join("\n")).toContain("2 packages");

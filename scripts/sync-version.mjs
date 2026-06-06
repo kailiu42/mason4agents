@@ -47,8 +47,10 @@ export function packageVersion(root) {
 export function versionUpdates(root, version) {
   const cargoTomlPath = join(root, "crates", "mason4agents", "Cargo.toml");
   const cargoLockPath = join(root, "Cargo.lock");
+  const tuiPath = join(root, "src", "tui", "mason-tui.ts");
   const cargoToml = readText(cargoTomlPath);
   const cargoLock = readText(cargoLockPath);
+  const tui = readText(tuiPath);
   return [
     {
       label: "crates/mason4agents/Cargo.toml",
@@ -61,6 +63,12 @@ export function versionUpdates(root, version) {
       path: cargoLockPath,
       current: cargoLock,
       next: syncCargoLock(cargoLock, version),
+    },
+    {
+    label: "src/tui/mason-tui.ts",
+    path: tuiPath,
+    current: tui,
+    next: syncTuiVersion(tui, version),
     },
   ];
 }
@@ -96,6 +104,12 @@ export function syncCargoLock(content, version) {
   }
   if (!found) fail("Cargo.lock is missing the mason4agents package block.");
   return updated;
+}
+
+export function syncTuiVersion(content, version) {
+  const versionLine = /^const MASON4AGENTS_VERSION = "[^"]+";$/m;
+  if (!versionLine.test(content)) fail("src/tui/mason-tui.ts is missing MASON4AGENTS_VERSION.");
+  return content.replace(versionLine, `const MASON4AGENTS_VERSION = "${version}";`);
 }
 
 function parseArgs(argv) {

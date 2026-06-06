@@ -20,8 +20,9 @@ function tempRoot(): string {
   return root;
 }
 
-function writeVersionFixture(root: string, versions: { packageJson: string; cargoToml: string; cargoLock: string }): void {
+function writeVersionFixture(root: string, versions: { packageJson: string; cargoToml: string; cargoLock: string; tui: string }): void {
   mkdirSync(join(root, "crates", "mason4agents"), { recursive: true });
+  mkdirSync(join(root, "src", "tui"), { recursive: true });
   writeFileSync(join(root, "package.json"), JSON.stringify({
     name: "mason4agents",
     version: versions.packageJson,
@@ -52,6 +53,11 @@ function writeVersionFixture(root: string, versions: { packageJson: string; carg
     "]",
     "",
   ].join("\n"));
+  writeFileSync(join(root, "src", "tui", "mason-tui.ts"), [
+    `const MASON4AGENTS_VERSION = "${versions.tui}";`,
+    "const MASON_TUI_TITLE = `mason4agents package manager v${MASON4AGENTS_VERSION}`;",
+    "",
+  ].join("\n"));
 }
 
 function runSyncVersion(root: string, ...args: string[]): ReturnType<typeof spawnSync> {
@@ -64,7 +70,7 @@ function runSyncVersion(root: string, ...args: string[]): ReturnType<typeof spaw
 describe("version sync script", () => {
   test("check fails when Cargo files drift from package.json", () => {
     const root = tempRoot();
-    writeVersionFixture(root, { packageJson: "1.2.3", cargoToml: "1.2.2", cargoLock: "1.2.2" });
+    writeVersionFixture(root, { packageJson: "1.2.3", cargoToml: "1.2.2", cargoLock: "1.2.2", tui: "1.2.2" });
 
     const result = runSyncVersion(root, "--check");
 
@@ -72,23 +78,24 @@ describe("version sync script", () => {
     expect(result.stderr).toContain("Version files are out of sync with package.json 1.2.3");
     expect(result.stderr).toContain("crates/mason4agents/Cargo.toml");
     expect(result.stderr).toContain("Cargo.lock");
+    expect(result.stderr).toContain("src/tui/mason-tui.ts");
   });
 
   test("sync updates Cargo files from package.json", () => {
     const root = tempRoot();
-    writeVersionFixture(root, { packageJson: "1.2.3-beta.1+build.5", cargoToml: "1.2.2", cargoLock: "1.2.2" });
+    writeVersionFixture(root, { packageJson: "1.2.3-beta.1+build.5", cargoToml: "1.2.2", cargoLock: "1.2.2", tui: "1.2.2" });
 
     const result = runSyncVersion(root);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(readFileSync(join(root, "crates", "mason4agents", "Cargo.toml"), "utf8")).toContain("version = \"1.2.3-beta.1+build.5\"");
     expect(readFileSync(join(root, "Cargo.lock"), "utf8")).toContain("name = \"mason4agents\"\nversion = \"1.2.3-beta.1+build.5\"");
+    expect(readFileSync(join(root, "src", "tui", "mason-tui.ts"), "utf8")).toContain("const MASON4AGENTS_VERSION = \"1.2.3-beta.1+build.5\";");
   });
 
   test("check passes when versions match", () => {
     const root = tempRoot();
-    writeVersionFixture(root, { packageJson: "1.2.3", cargoToml: "1.2.3", cargoLock: "1.2.3" });
-
+    writeVersionFixture(root, { packageJson: "1.2.3", cargoToml: "1.2.3", cargoLock: "1.2.3", tui: "1.2.3" });
     const result = runSyncVersion(root, "--check");
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);

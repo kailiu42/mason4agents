@@ -158,6 +158,8 @@ const SHELLS = new Set(["bash", "zsh", "fish", "powershell", "cmd", "json"]);
 const PANEL_MAX_ROWS = 18;
 const PANEL_DISPLAY_MIN_LINES = PANEL_MAX_ROWS + 4;
 const PROGRESS_POPUP_MIN_BODY_LINES = 16;
+const MASON4AGENTS_VERSION = "0.3.1";
+const MASON_TUI_TITLE = `mason4agents package manager v${MASON4AGENTS_VERSION}`;
 const LIVE_NAME_FILTER_MIN_CHARS = 3;
 const PICKER_MAX_ROWS = 10;
 const TAB_SEPARATOR = "  ╱  ";
@@ -664,7 +666,7 @@ export function renderMasonTuiLines(state: MasonTuiState, width: number, style: 
   const safeWidth = normalizeWidth(width);
   syncActiveRows(state);
   const lines = [
-    styleLine(fitToWidth("mason4agents package manager", safeWidth), style.title),
+    styleLine(fitToWidth(MASON_TUI_TITLE, safeWidth), style.title),
     renderCommandTabs(state, safeWidth, style),
     styleLine("─".repeat(safeWidth), style.divider),
   ];
