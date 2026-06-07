@@ -2,7 +2,7 @@ use crate::types::{msg, M4aError, Result};
 use flate2::read::GzDecoder;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 pub fn split_archive_spec(spec: &str) -> (&str, Option<&str>) {
@@ -130,6 +130,14 @@ fn unpack_tar<R: io::Read>(reader: R, dest: &Path, strip_prefix: Option<&str>) -
     for entry in archive.entries()? {
         let mut entry = entry?;
         let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions() || kind.is_pax_local_extensions() {
+            reject_file_affecting_pax(&mut entry)?;
+            continue;
+        }
+        if is_ignored_tar_metadata(kind) {
+            continue;
+        }
+        reject_entry_pax_extensions(&mut entry)?;
         let path = entry.path()?.to_path_buf();
         if !kind.is_file() && !kind.is_dir() {
             return Err(M4aError::UnsafeArchiveEntry(format!(
@@ -180,6 +188,52 @@ fn unpack_gz(path: &Path, dest: &Path) -> Result<()> {
     let mut output = File::create(out)?;
     io::copy(&mut decoder, &mut output)?;
     Ok(())
+}
+
+fn is_ignored_tar_metadata(kind: tar::EntryType) -> bool {
+    kind.is_gnu_longname() || kind.is_gnu_longlink()
+}
+
+fn reject_file_affecting_pax<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<()> {
+    let mut payload = Vec::new();
+    entry.read_to_end(&mut payload)?;
+    for extension in tar::PaxExtensions::new(&payload) {
+        let extension = extension?;
+        let key = extension
+            .key()
+            .map_err(|_| msg("pax extension key is not valid utf-8"))?;
+        reject_file_affecting_pax_key(key)?;
+    }
+    Ok(())
+}
+
+fn reject_entry_pax_extensions<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<()> {
+    let Some(extensions) = entry.pax_extensions()? else {
+        return Ok(());
+    };
+    for extension in extensions {
+        let extension = extension?;
+        let key = extension
+            .key()
+            .map_err(|_| msg("pax extension key is not valid utf-8"))?;
+        reject_file_affecting_pax_key(key)?;
+    }
+    Ok(())
+}
+
+fn reject_file_affecting_pax_key(key: &str) -> Result<()> {
+    if is_file_affecting_pax_key(key) {
+        return Err(M4aError::UnsafeArchiveEntry(format!(
+            "unsupported pax extension key {key}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_file_affecting_pax_key(key: &str) -> bool {
+    matches!(key, "path" | "linkpath" | "size")
+        || key.starts_with("SCHILY.xattr.")
+        || key.starts_with("GNU.sparse.")
 }
 
 fn apply_strip_prefix(path: &Path, strip_prefix: Option<&str>) -> Result<Option<PathBuf>> {
@@ -295,6 +349,55 @@ mod tests {
         }
         unpack_archive(&tgz_path, &tmp.path().join("tgz-out"), Some("pkg")).unwrap();
         assert!(tmp.path().join("tgz-out/file").exists());
+
+        let pax_tgz_path = tmp.path().join("pax.tgz");
+        {
+            let file = File::create(&pax_tgz_path).unwrap();
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut tar = Builder::new(encoder);
+            let pax = b"18 comment=global\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_path("pax_global_header").unwrap();
+            header.set_size(pax.len() as u64);
+            header.set_cksum();
+            tar.append(&header, &pax[..]).unwrap();
+            let mut file_header = tar::Header::new_gnu();
+            file_header.set_path("pkg/pax-file").unwrap();
+            file_header.set_size(2);
+            file_header.set_cksum();
+            tar.append(&file_header, &b"ok"[..]).unwrap();
+            tar.finish().unwrap();
+        }
+        unpack_archive(&pax_tgz_path, &tmp.path().join("pax-out"), Some("pkg")).unwrap();
+        assert!(tmp.path().join("pax-out/pax-file").exists());
+
+        let bad_pax_tgz_path = tmp.path().join("bad-pax.tgz");
+        {
+            let file = File::create(&bad_pax_tgz_path).unwrap();
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut tar = Builder::new(encoder);
+            let pax = b"16 path=../evil\n";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::XGlobalHeader);
+            header.set_path("pax_global_header").unwrap();
+            header.set_size(pax.len() as u64);
+            header.set_cksum();
+            tar.append(&header, &pax[..]).unwrap();
+            let mut file_header = tar::Header::new_gnu();
+            file_header.set_path("pkg/pax-file").unwrap();
+            file_header.set_size(2);
+            file_header.set_cksum();
+            tar.append(&file_header, &b"ok"[..]).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = unpack_archive(
+            &bad_pax_tgz_path,
+            &tmp.path().join("bad-pax-out"),
+            Some("pkg"),
+        )
+        .expect_err("file-affecting pax metadata must be rejected");
+        assert!(matches!(err, M4aError::UnsafeArchiveEntry(_)));
 
         let bad_tar = tmp.path().join("bad.tar");
         {

@@ -159,11 +159,11 @@ impl RawPackageSpec {
             .map(|raw| select_download_entry(raw, platform, &self.name))
             .transpose()?
             .flatten();
-        let build_scripts = extract_build_scripts(&selected_source.build, platform);
+        let selected_build = select_build(&selected_source.build, platform);
+        let build_scripts = extract_build_scripts(selected_build.as_ref(), platform);
         // Build initial context (without source.build) to render the build spec itself.
         let initial_context = context_for(&version, &source_id, asset.as_ref(), None);
-        let rendered_build = selected_source
-            .build
+        let rendered_build = selected_build
             .as_ref()
             .map(|raw| {
                 render_value_deep(
@@ -272,8 +272,55 @@ fn render_map(raw: &BTreeMap<String, String>, context: &Value) -> Result<BTreeMa
         .collect()
 }
 
-fn extract_build_scripts(build: &Option<serde_yaml::Value>, platform: &Platform) -> Vec<String> {
-    let Some(value) = build.as_ref() else {
+fn select_build(
+    build: &Option<serde_yaml::Value>,
+    platform: &Platform,
+) -> Option<serde_yaml::Value> {
+    let value = build.as_ref()?;
+    let serde_yaml::Value::Sequence(seq) = value else {
+        return Some(value.clone());
+    };
+    let has_targets = seq.iter().any(|v| {
+        v.as_mapping()
+            .and_then(|m| m.get(serde_yaml::Value::String("target".to_owned())))
+            .is_some()
+    });
+    if !has_targets {
+        return Some(value.clone());
+    }
+    let candidates = platform.candidates();
+    let target_key = serde_yaml::Value::String("target".to_owned());
+    for candidate in candidates {
+        for item in seq {
+            if let Some(mapping) = item.as_mapping() {
+                let raw_target = mapping.get(&target_key);
+                let target_matches = match raw_target {
+                    Some(serde_yaml::Value::String(s)) => s == candidate.as_str(),
+                    Some(serde_yaml::Value::Sequence(arr)) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .any(|target| target == candidate.as_str()),
+                    _ => false,
+                };
+                if target_matches {
+                    return Some(item.clone());
+                }
+            }
+        }
+    }
+    seq.iter()
+        .find(|item| {
+            item.as_mapping()
+                .map(|mapping| {
+                    !mapping.contains_key(serde_yaml::Value::String("target".to_owned()))
+                })
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
+fn extract_build_scripts(build: Option<&serde_yaml::Value>, platform: &Platform) -> Vec<String> {
+    let Some(value) = build else {
         return Vec::new();
     };
     let run = match value {
@@ -282,7 +329,6 @@ fn extract_build_scripts(build: &Option<serde_yaml::Value>, platform: &Platform)
             .unwrap_or(value),
         other => other,
     };
-    // If run is a sequence of platform-targeted entries, select the matching one.
     if let serde_yaml::Value::Sequence(seq) = run {
         let has_targets = seq.iter().any(|v| {
             v.as_mapping()
@@ -290,35 +336,29 @@ fn extract_build_scripts(build: &Option<serde_yaml::Value>, platform: &Platform)
                 .is_some()
         });
         if has_targets {
-            let candidates = platform.candidates();
-            // First try to find a matching target entry.
-            for item in seq {
-                if let Some(mapping) = item.as_mapping() {
-                    let target_key = serde_yaml::Value::String("target".to_owned());
-                    let raw_target = mapping.get(&target_key);
-                    let target_strs: Vec<&str> = match raw_target {
-                        Some(serde_yaml::Value::String(s)) => vec![s.as_str()],
-                        Some(serde_yaml::Value::Sequence(arr)) => {
-                            arr.iter().filter_map(|v| v.as_str()).collect()
-                        }
-                        _ => Vec::new(),
-                    };
-                    if target_strs.is_empty() {
-                        continue;
-                    }
-                    if target_strs
-                        .iter()
-                        .any(|t| candidates.contains(&t.to_string()))
-                    {
-                        if let Some(run_val) =
-                            mapping.get(serde_yaml::Value::String("run".to_owned()))
-                        {
-                            return extract_run_strings(run_val);
+            for candidate in platform.candidates() {
+                for item in seq {
+                    if let Some(mapping) = item.as_mapping() {
+                        let target_key = serde_yaml::Value::String("target".to_owned());
+                        let raw_target = mapping.get(&target_key);
+                        let target_matches = match raw_target {
+                            Some(serde_yaml::Value::String(s)) => s == candidate.as_str(),
+                            Some(serde_yaml::Value::Sequence(arr)) => arr
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .any(|target| target == candidate.as_str()),
+                            _ => false,
+                        };
+                        if target_matches {
+                            if let Some(run_val) =
+                                mapping.get(serde_yaml::Value::String("run".to_owned()))
+                            {
+                                return extract_run_strings(run_val);
+                            }
                         }
                     }
                 }
             }
-            // Fallback: first entry without a target field.
             for item in seq {
                 if let Some(mapping) = item.as_mapping() {
                     let target_key = serde_yaml::Value::String("target".to_owned());
@@ -332,16 +372,8 @@ fn extract_build_scripts(build: &Option<serde_yaml::Value>, platform: &Platform)
                 }
             }
         }
-        // Plain sequence of strings.
-        return seq
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect();
     }
-    if let serde_yaml::Value::String(s) = run {
-        return vec![s.clone()];
-    }
-    Vec::new()
+    extract_run_strings(run)
 }
 
 fn extract_run_strings(run: &serde_yaml::Value) -> Vec<String> {
@@ -904,5 +936,104 @@ source:
             .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
             .unwrap();
         assert_eq!(pkg.source.build_scripts, vec!["echo build"]);
+    }
+
+    #[test]
+    fn selects_platform_build_for_bin_templates() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: java-language-server
+source:
+  id: pkg:github/georgewfraser/java-language-server@v0.2.39
+  build:
+    - target: linux
+      run:
+        - ./scripts/link_linux.sh
+        - mvn package -DskipTests
+      bin:
+        lsp: exec:dist/lang_server_linux.sh
+        dap: exec:dist/debug_adapter_linux.sh
+    - target: win
+      run:
+        - bash .\scripts\link_windows.sh
+        - mvn package -DskipTests
+      bin:
+        lsp: dist/lang_server_windows.cmd
+        dap: dist/debug_adapter_windows.cmd
+bin:
+  java-language-server: "{{source.build.bin.lsp}}"
+  java-language-server-debugger: "{{source.build.bin.dap}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(
+            pkg.bins.get("java-language-server").unwrap(),
+            "exec:dist/lang_server_linux.sh"
+        );
+        assert_eq!(
+            pkg.bins.get("java-language-server-debugger").unwrap(),
+            "exec:dist/debug_adapter_linux.sh"
+        );
+        assert_eq!(
+            pkg.source.build_scripts,
+            vec!["./scripts/link_linux.sh", "mvn package -DskipTests"]
+        );
+    }
+
+    #[test]
+    fn build_target_specificity_beats_yaml_order() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: scripted
+source:
+  id: pkg:generic/acme/scripted@1.0.0
+  build:
+    - target: linux
+      run:
+        - generic-linux
+      bin:
+        scripted: generic
+    - target: linux_x64_gnu
+      run:
+        - specific-linux
+      bin:
+        scripted: specific
+bin:
+  scripted: "{{source.build.bin.scripted}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(pkg.bins.get("scripted").unwrap(), "specific");
+        assert_eq!(pkg.source.build_scripts, vec!["specific-linux"]);
+    }
+
+    #[test]
+    fn nested_build_run_target_specificity_beats_yaml_order() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: scripted
+source:
+  id: pkg:generic/acme/scripted@1.0.0
+  build:
+    run:
+      - target: linux
+        run:
+          - generic-linux
+      - target: linux_x64_gnu
+        run:
+          - specific-linux
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        assert_eq!(pkg.source.build_scripts, vec!["specific-linux"]);
     }
 }

@@ -697,6 +697,31 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
+enum GithubInstallPlan {
+    AssetFiles,
+    SourceArchive {
+        locator: String,
+        strip_prefix: String,
+    },
+}
+
+fn github_install_plan(package: &NormalizedPackage) -> Result<GithubInstallPlan> {
+    if package.source.asset.is_some() {
+        return Ok(GithubInstallPlan::AssetFiles);
+    }
+    if package.source.build_scripts.is_empty() {
+        return Err(msg(format!(
+            "github package {} has no selected asset",
+            package.name
+        )));
+    }
+    Ok(GithubInstallPlan::SourceArchive {
+        locator: github::source_archive_url(&package.source)?,
+        strip_prefix: github::source_archive_strip_prefix(&package.source),
+    })
+}
+
 fn install_github_with_progress(
     paths: &MasonPaths,
     package: &NormalizedPackage,
@@ -704,25 +729,47 @@ fn install_github_with_progress(
     operation: &str,
     progress: &dyn ProgressSink,
 ) -> Result<()> {
-    install_asset_file_specs_with_progress(
-        paths,
-        package,
-        staging,
-        operation,
-        progress,
-        "github",
-        |file| {
-            if local_path(file).is_some()
-                || file.starts_with("file://")
-                || file.starts_with("http://")
-                || file.starts_with("https://")
-            {
-                Ok(file.to_owned())
-            } else {
-                github::release_asset_url(&package.source, file)
-            }
-        },
-    )
+    match github_install_plan(package)? {
+        GithubInstallPlan::AssetFiles => install_asset_file_specs_with_progress(
+            paths,
+            package,
+            staging,
+            operation,
+            progress,
+            "github",
+            |file| {
+                if local_path(file).is_some()
+                    || file.starts_with("file://")
+                    || file.starts_with("http://")
+                    || file.starts_with("https://")
+                {
+                    Ok(file.to_owned())
+                } else {
+                    github::release_asset_url(&package.source, file)
+                }
+            },
+        ),
+        GithubInstallPlan::SourceArchive {
+            locator,
+            strip_prefix,
+        } => {
+            let downloaded = download_to_cache_with_progress(
+                &locator,
+                &paths.downloads_dir,
+                operation,
+                Some(&package.name),
+                progress,
+            )?;
+            unpack_or_copy_with_progress(
+                &downloaded,
+                staging,
+                Some(&strip_prefix),
+                operation,
+                Some(&package.name),
+                progress,
+            )
+        }
+    }
 }
 
 fn install_generic_with_progress(
@@ -1085,6 +1132,7 @@ mod tests {
         opt_name: &str,
     ) -> PathBuf {
         let dir = root.join("registry/packages").join(package_name);
+
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("package.yaml"),
@@ -1130,6 +1178,38 @@ opt:
 
     fn block_next_state_save(paths: &MasonPaths) {
         fail_next_state_save_for_test(&paths.state_file);
+    }
+
+    fn github_package(asset: Option<AssetSpec>, build_scripts: &[&str]) -> NormalizedPackage {
+        NormalizedPackage {
+            name: "java-language-server".to_owned(),
+            version: "v0.2.39".to_owned(),
+            description: None,
+            languages: vec![],
+            categories: vec![],
+            deprecated: false,
+            source: NormalizedSource {
+                id: "pkg:github/georgewfraser/java-language-server@v0.2.39".to_owned(),
+                source_type: "github".to_owned(),
+                namespace: Some("georgewfraser".to_owned()),
+                package: "java-language-server".to_owned(),
+                version: "v0.2.39".to_owned(),
+                asset,
+                extra_packages: vec![],
+                build_scripts: build_scripts
+                    .iter()
+                    .map(|script| (*script).to_owned())
+                    .collect(),
+                qualifiers: BTreeMap::new(),
+                subpath: None,
+                build: None,
+                download: None,
+            },
+            bins: BTreeMap::new(),
+            share: BTreeMap::new(),
+            opt: BTreeMap::new(),
+            neovim_lspconfig: None,
+        }
     }
     #[test]
     fn select_executable_path_prefers_bare_on_windows() {
@@ -1463,6 +1543,55 @@ share:
             .install_normalized_for_request("install", package, false, false, &progress)
             .unwrap_err();
         assert!(matches!(err, M4aError::BuildScriptsDisabled { .. }));
+    }
+
+    #[test]
+    fn github_without_asset_uses_source_archive_when_building_from_source() {
+        let package = github_package(None, &["mvn package -DskipTests"]);
+
+        match github_install_plan(&package).unwrap() {
+            GithubInstallPlan::SourceArchive {
+                locator,
+                strip_prefix,
+            } => {
+                assert_eq!(
+                    locator,
+                    "https://github.com/georgewfraser/java-language-server/archive/refs/tags/v0.2.39.tar.gz"
+                );
+                assert_eq!(strip_prefix, "java-language-server-0.2.39");
+            }
+            GithubInstallPlan::AssetFiles => panic!("expected source archive install plan"),
+        }
+    }
+
+    #[test]
+    fn github_with_asset_keeps_release_asset_install_path() {
+        let package = github_package(
+            Some(AssetSpec {
+                target: None,
+                file: Some("java-language-server.zip".to_owned()),
+                extra_files: Vec::new(),
+                bin: None,
+                extra: BTreeMap::new(),
+            }),
+            &["mvn package -DskipTests"],
+        );
+
+        assert!(matches!(
+            github_install_plan(&package).unwrap(),
+            GithubInstallPlan::AssetFiles
+        ));
+    }
+
+    #[test]
+    fn github_without_asset_or_build_scripts_errors_explicitly() {
+        let package = github_package(None, &[]);
+
+        let err = github_install_plan(&package).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("github package java-language-server has no selected asset"));
     }
 
     #[test]
