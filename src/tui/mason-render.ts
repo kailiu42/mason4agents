@@ -540,7 +540,40 @@ function formatPrefixedTableLine(line: string, prefix: string, hasSelection: boo
 
 function renderTextDisplay(title: string, textLines: readonly string[], width: number, style?: RenderStyle): string[] {
   const lines = [truncateToWidth(title, width)];
-  for (const line of textLines) lines.push(renderInlineShortcutText(line, width, style));
+   for (const line of textLines) {
+      for (const wrapped of wrapTextLines(line, width)) {
+         lines.push(renderInlineShortcutText(wrapped, width, style));
+      }
+   }
+   return lines;
+}
+
+function wrapTextLines(value: string, width: number): string[] {
+   const explicitLines = value.split("\n");
+   const lines: string[] = [];
+   for (const line of explicitLines) {
+      lines.push(...wrapTextLine(line, width));
+   }
+   return lines;
+}
+
+function wrapTextLine(value: string, width: number): string[] {
+   if (width <= 0) return [""];
+   if (value.length === 0) return [""];
+   const lines: string[] = [];
+   let rest = value;
+   while (rest.length > width) {
+      const index = wrapIndex(rest, width);
+      const line = rest.slice(0, index).trimEnd();
+      if (line.length > 0) {
+         lines.push(line);
+         rest = rest.slice(index).trimStart();
+      } else {
+         lines.push(rest.slice(0, width));
+         rest = rest.slice(width);
+      }
+   }
+   lines.push(rest);
   return lines;
 }
 
@@ -695,8 +728,13 @@ function wrapCell(value: string, width: number): string[] {
   while (rest.length > width) {
     const index = wrapIndex(rest, width);
     const line = rest.slice(0, index).trimEnd();
-    lines.push(line.length > 0 ? line : rest.slice(0, width));
+      if (line.length > 0) {
+         lines.push(line);
     rest = rest.slice(index).trimStart();
+      } else {
+         lines.push(rest.slice(0, width));
+         rest = rest.slice(width).trimStart();
+      }
   }
   lines.push(rest);
   return lines;

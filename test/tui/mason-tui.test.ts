@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { formatDisplayTimestamp, modelForResult, renderDisplay } from "../../src/tui/mason-render";
+import { errorDisplay, formatDisplayTimestamp, modelForResult, renderDisplay } from "../../src/tui/mason-render";
 import { createMasonTui, MASON_TUI_COMMANDS, type MasonTuiHost } from "../../src/tui/mason-tui";
 
 function localDisplayTimestamp(value: string): string {
   const date = new Date(value);
   const pad = (part: number) => part < 10 ? `0${part}` : String(part);
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+async function flushMicrotasks(count = 5): Promise<void> {
+   for (let index = 0; index < count; index += 1) await Promise.resolve();
 }
 
 function packages() {
@@ -32,6 +36,25 @@ function packages() {
       categories: ["LSP"],
       description: "Lua LSP",
       neovim_lspconfig: "lua_ls",
+      },
+   ];
+}
+
+function buildPackages(installed = false, withExtraPackages = true) {
+   return [
+      {
+         name: "native-tool",
+         version: "v1.0.0",
+         installed,
+         installed_version: installed ? "v0.9.0" : null,
+         outdated: installed,
+         deprecated: false,
+         languages: ["C"],
+         categories: ["Formatter"],
+         description: "Native tool built from source",
+         requires_build_scripts: true,
+         build_scripts: ["./configure", "make install"],
+         extra_packages: withExtraPackages ? ["gcc", "make"] : [],
     },
   ];
 }
@@ -281,6 +304,32 @@ describe("Mason TUI core", () => {
     expect(oneRow.slice(5, 7).every((line) => line.trim().length === 0)).toBe(true);
   });
 
+   test("wraps long error text across visible lines", () => {
+      const model = errorDisplay(
+         "mason install",
+         "registry build failed because this deliberately long compiler diagnostic should wrap across several visible lines instead of being clipped",
+         ["first explicit line\nsecond explicit line with another deliberately long explanation that should also wrap"],
+      );
+
+      const lines = renderDisplay(model, { width: 48, maxRows: 10 });
+      const text = lines.join("\n");
+
+      expect(lines.every((line) => line.length <= 48)).toBe(true);
+      expect(text).toContain("Error: registry build failed because this");
+      expect(text).toContain("deliberately long compiler diagnostic should");
+      expect(text).toContain("second explicit line with another deliberately");
+      expect(text).not.toContain("…");
+   });
+
+   test("wraps hard chunks after leading whitespace without duplicating text", () => {
+      const model = errorDisplay("mason install", "bad", ["   abcdef"]);
+
+      const text = renderDisplay(model, { width: 4, maxRows: 6 }).join("\n");
+
+      expect(text).toContain("   a\nbcde\nf");
+      expect(text).not.toContain("   a\nabcd");
+   });
+
   test("moves selection, filters rows, and opens detail", async () => {
     const { host: fake } = host();
     const tui = createMasonTui(fake);
@@ -383,6 +432,218 @@ describe("Mason TUI core", () => {
     expect(syncs()).toBe(3);
   });
 
+   test("shows build-from-source metadata in package detail", async () => {
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            if (args[0] === "list") return Promise.resolve(buildPackages(false));
+            return Promise.resolve({ args });
+         },
+      };
+      const tui = createMasonTui(fake);
+      await tui.runCurrent();
+
+      await tui.handleInput("enter");
+      const detail = tui.render();
+
+      expect(detail).toContain("Build from source: requires local build scripts");
+      expect(detail).toContain("Build scripts: ./configure, make install");
+      expect(detail).toContain("Extra packages: gcc, make");
+   });
+
+   test("confirms selected build-script installs before running CLI", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args, options) {
+            calls.push(args);
+            if (args[0] === "list") return Promise.resolve(buildPackages(false));
+            if (args[0] === "install") {
+               options?.onProgress?.({
+                  kind: "progress",
+                  schema_version: 1,
+                  operation: "install",
+                  phase: "package",
+                  status: "running",
+                  package: args[1] ?? "",
+                  message: "install running",
+                  elapsed_ms: 1,
+               });
+               return Promise.resolve([{ package: args[1], version: "v1.0.0", source_id: "pkg:generic/acme/native-tool@v1.0.0", bins: {}, package_dir: "/tmp/native-tool" }]);
+            }
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+      await tui.runCurrent();
+
+      await tui.handleInput("i");
+
+      expect(tui.render()).toContain("confirm build scripts");
+      expect(tui.render()).toContain("Local shell build scripts from the registry will run.");
+      expect(tui.render()).toContain("Package: native-tool");
+      expect(tui.render()).toContain("Scripts: ./configure, make install");
+      expect(tui.render()).toContain("Extra packages: gcc, make");
+      expect(calls).toEqual([["list"]]);
+
+      await tui.handleInput("enter");
+
+      expect(calls).toContainEqual(["install", "native-tool", "--allow-build-scripts"]);
+      expect(calls.filter((args) => args[0] === "install")).toHaveLength(1);
+
+      const resultText = tui.renderLines(80).map(stripAnsi).join("\n");
+      expect(resultText).toContain("--allow-build-scripts");
+      expect(resultText).toContain("operation result");
+   });
+
+   test("cancels selected build-script install without running CLI", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            calls.push(args);
+            if (args[0] === "list") return Promise.resolve(buildPackages(false, false));
+            return Promise.resolve({ args });
+         },
+      };
+      const tui = createMasonTui(fake);
+      await tui.runCurrent();
+
+      await tui.handleInput("i");
+      expect(tui.render()).toContain("Build tool dependencies are not declared by the registry.");
+      await tui.handleInput("escape");
+
+      expect(tui.render()).not.toContain("confirm build scripts");
+      expect(calls).toEqual([["list"]]);
+   });
+
+   test("intercepts direct progress update for loaded build-script package", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            calls.push(args);
+            if (args[0] === "list") return Promise.resolve(buildPackages(true));
+            if (args[0] === "update") return Promise.resolve([{ package: args[1], version: "v1.0.0", source_id: "pkg:generic/acme/native-tool@v1.0.0", bins: {}, package_dir: "/tmp/native-tool" }]);
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+      await tui.runCurrent();
+
+      await tui.runProgress(["update", "native-tool"], "install", "mason update", { syncAfterPackageChange: true, preservePackage: "native-tool" });
+      expect(calls).toEqual([["list"]]);
+      expect(tui.render()).toContain("confirm build scripts");
+
+      await tui.handleInput("enter");
+
+      expect(calls).toContainEqual(["update", "native-tool", "--allow-build-scripts"]);
+      expect(calls.filter((args) => args[0] === "update")).toHaveLength(1);
+   });
+
+   test("fetches metadata before direct build-script install confirmation", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            calls.push(args);
+            if (args[0] === "search") return Promise.resolve(buildPackages(false));
+            if (args[0] === "install") return Promise.resolve([{ package: args[1], version: "v1.0.0", source_id: "pkg:generic/acme/native-tool@v1.0.0", bins: {}, package_dir: "/tmp/native-tool" }]);
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+
+      await tui.install(["native-tool"]);
+      expect(calls).toEqual([["search", "native-tool"]]);
+      expect(tui.render()).toContain("confirm build scripts");
+
+      await tui.handleInput("enter");
+
+      expect(calls).toContainEqual(["install", "native-tool", "--allow-build-scripts"]);
+      expect(calls.filter((args) => args[0] === "install")).toHaveLength(1);
+   });
+
+   test("confirms build scripts before update-all when outdated packages need builds", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            calls.push(args);
+            if (args[0] === "list" && args.includes("--outdated")) return Promise.resolve(buildPackages(true));
+            if (args[0] === "update") return Promise.resolve([{ package: "native-tool", version: "v1.0.0", source_id: "pkg:generic/acme/native-tool@v1.0.0", bins: {}, package_dir: "/tmp/native-tool" }]);
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+
+      await tui.update();
+      expect(calls).toEqual([["list", "--outdated"]]);
+      expect(tui.render()).toContain("confirm build scripts");
+
+      await tui.handleInput("enter");
+
+      expect(calls).toContainEqual(["update", "--allow-build-scripts"]);
+   });
+
+   test("ignores stale build-script metadata fetches", async () => {
+      const { promise, resolve } = Promise.withResolvers<unknown>();
+      const fake: MasonTuiHost = {
+         runCli(args) {
+            if (args[0] === "search" && args[1] === "native-tool") return promise;
+            if (args[0] === "search") return Promise.resolve(packages());
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+
+      const installRun = tui.install(["native-tool"]);
+      await tui.search("lua");
+      resolve(buildPackages(false));
+      await installRun;
+
+      expect(tui.render()).not.toContain("confirm build scripts");
+      expect(tui.state.query).toBe("lua");
+   });
+
+   test("shows build-script confirmation ahead of stale progress result", async () => {
+      const calls: string[][] = [];
+      const fake: MasonTuiHost = {
+         runCli(args, options) {
+            calls.push(args);
+            if (args[0] === "search") return Promise.resolve(buildPackages(false));
+            if (args[0] === "install") {
+               options?.onProgress?.({
+                  kind: "progress",
+                  schema_version: 1,
+                  operation: "install",
+                  phase: "package",
+                  status: "running",
+                  package: args[1] ?? "",
+                  message: "install running",
+                  elapsed_ms: 1,
+               });
+               return Promise.resolve([{ package: args[1], version: "v1.0.0", source_id: `pkg:generic/acme/${args[1]}@v1.0.0`, bins: {}, package_dir: `/tmp/${args[1]}` }]);
+            }
+            return Promise.resolve({ args });
+         },
+         syncAfterPackageChange() { },
+      };
+      const tui = createMasonTui(fake);
+
+      await tui.runProgress(["install", "stylua"], "install", "mason install", { syncAfterPackageChange: true, preservePackage: "stylua" });
+      expect(tui.render()).toContain("operation result");
+
+      await tui.install(["native-tool"]);
+      const confirmationText = tui.render();
+      expect(confirmationText).toContain("confirm build scripts");
+      expect(confirmationText).not.toContain("operation result");
+
+      await tui.handleInput("escape");
+      expect(tui.render()).not.toContain("operation result");
+      expect(calls).toEqual([["search", "stylua"], ["install", "stylua"], ["list"], ["search", "native-tool"]]);
+   });
+
+
   test("shows progress modal, blocks input, times out, and keeps final result", async () => {
     let resolveInstall!: (value: unknown) => void;
     const calls: string[][] = [];
@@ -411,7 +672,7 @@ describe("Mason TUI core", () => {
         if (args[0] === "list") return Promise.resolve(packages());
         return Promise.resolve({ args });
       },
-      syncAfterPackageChange() {},
+         syncAfterPackageChange() { },
     };
     const tui = createMasonTui(fake, { progressTimeoutMs: 0 });
 
@@ -431,7 +692,14 @@ describe("Mason TUI core", () => {
     expect(progressTitleLine?.trim().length).toBe(40);
     await tui.handleInput("down");
     expect(tui.state.selectedIndex).toBe(0);
-    expect(tui.render()).toContain("No progress for 0s");
+      const timedOutText = tui.renderLines(80).map(stripAnsi).join("\n");
+      expect(timedOutText).toContain("Status: still running");
+      expect(timedOutText).toContain("No CLI output for");
+      expect(timedOutText).toContain("Activity:");
+      expect(timedOutText).toContain("🟢");
+      expect(timedOutText).toContain("Quiet build still running.");
+      expect(timedOutText).toContain("Wait; close keeps running.");
+      expect(timedOutText).toContain("keeps running");
     await tui.handleInput("q");
     expect(tui.render()).not.toContain("operation progress");
 
@@ -444,6 +712,83 @@ describe("Mason TUI core", () => {
     await tui.handleInput("q");
     expect(tui.state.progress).toBeUndefined();
   });
+   test("wraps long progress events without ellipsis truncation", async () => {
+      let resolveInstall!: (value: unknown) => void;
+      const fake: MasonTuiHost = {
+         runCli(args, options) {
+            if (args[0] === "install") {
+               options?.onProgress?.({
+                  kind: "progress",
+                  schema_version: 1,
+                  operation: "install",
+                  phase: "package",
+                  status: "failed",
+                  package: "java-language-server",
+                  message: "github package java-language-server has no selected asset",
+                  elapsed_ms: 1,
+               });
+               return new Promise((resolve) => {
+                  resolveInstall = resolve;
+               });
+            }
+            return Promise.resolve({ args });
+         },
+      };
+      const tui = createMasonTui(fake);
+
+      const pending = tui.runProgress(["install", "java-language-server"], "install", "mason install");
+
+      const progressText = tui.renderLines(80).map(stripAnsi).join("\n");
+      expect(progressText).toContain("operation progress");
+      expect(progressText).toContain("• failed java-language-server");
+      expect(progressText).toContain("package: github package");
+      expect(progressText).toContain("java-language-server has no");
+      expect(progressText).toContain("selected asset");
+      expect(progressText).not.toContain("selected asset…");
+
+      resolveInstall([]);
+      await pending;
+   });
+
+   test("shows concise failure with full log path instead of full command output", async () => {
+      const verboseOutput = [
+         "command failed: mvn exited with 1: [ERROR] Compilation failure",
+         "Compiling 357 source files to /tmp/mason4agents/classes",
+         "BUILD FAILURE".repeat(20),
+         "Full log: /tmp/mason4agents/build.log",
+      ].join("\n");
+      const fake: MasonTuiHost = {
+         runCli(args, options) {
+            if (args[0] === "install") {
+               options?.onProgress?.({
+                  kind: "progress",
+                  schema_version: 1,
+                  operation: "install",
+                  phase: "request",
+                  status: "failed",
+                  message: "command failed: mvn exited with 1: [ERROR] Compilation failure",
+                  elapsed_ms: 1,
+               });
+               return Promise.reject(new Error(verboseOutput));
+            }
+            return Promise.resolve({ args });
+         },
+      };
+      const tui = createMasonTui(fake);
+
+      await tui.runProgress(["install", "java-language-server"], "install", "mason install");
+
+      const lines = tui.renderLines(100).map(stripAnsi);
+      const text = lines.join("\n");
+      const statusIndex = lines.findIndex((line) => line.includes("Status: failed"));
+      expect(statusIndex).toBeGreaterThanOrEqual(0);
+      expect(lines[statusIndex + 1]).toContain("Full log: /tmp/mason4agents/build.log");
+      expect(text.match(/Full log:/g)).toHaveLength(1);
+      expect(text).toContain("[ERROR] Compilation failure");
+      expect(text).not.toContain("Compiling 357 source files");
+      expect(text).not.toContain("BUILD FAILURE");
+   });
+
   test("keeps the existing list behind the result popup while refresh is pending", async () => {
     let resolveRefreshedList!: (value: unknown) => void;
     let listCalls = 0;
@@ -479,7 +824,7 @@ describe("Mason TUI core", () => {
         }
         return Promise.resolve({ args });
       },
-      syncAfterPackageChange() {},
+         syncAfterPackageChange() { },
     };
     const tui = createMasonTui(fake);
 
@@ -530,8 +875,7 @@ describe("Mason TUI core", () => {
     const tui = createMasonTui(fake);
 
     const pending = tui.install(["stylua"]);
-    await Promise.resolve();
-    await Promise.resolve();
+      await flushMicrotasks();
     expect(syncStarted).toBe(true);
     expect(listCalls).toBe(0);
 
@@ -562,13 +906,12 @@ describe("Mason TUI core", () => {
         }
         return Promise.resolve({ args });
       },
-      syncAfterPackageChange() {},
+         syncAfterPackageChange() { },
     };
     const tui = createMasonTui(fake);
 
     const packageRun = tui.install(["stylua"]);
-    await Promise.resolve();
-    await Promise.resolve();
+      await flushMicrotasks();
     expect(pending.map((item) => item.args)).toEqual([["list"]]);
 
     await tui.handleInput("q");
@@ -630,11 +973,12 @@ describe("Mason TUI core", () => {
         }
         return Promise.resolve({ args });
       },
-      syncAfterPackageChange() {},
+         syncAfterPackageChange() { },
     };
     const tui = createMasonTui(fake);
 
     const pending = tui.install(["stylua"]);
+      await flushMicrotasks();
     const activeLines = tui.renderLines(80).map(stripAnsi);
     const activeTop = activeLines.findIndex((line) => line.includes("operation progress"));
     const activeBottom = activeLines.findIndex((line) => line.includes("╰"));
