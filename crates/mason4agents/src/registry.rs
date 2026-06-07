@@ -37,6 +37,12 @@ pub struct PackageSummary {
     pub outdated: bool,
     pub deprecated: bool,
     pub neovim_lspconfig: Option<String>,
+    #[serde(default)]
+    pub requires_build_scripts: bool,
+    #[serde(default)]
+    pub build_scripts: Vec<String>,
+    #[serde(default)]
+    pub extra_packages: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -425,6 +431,17 @@ pub fn summary_for(
     let normalized = raw.normalize(platform, None).ok();
     let installed_pkg = installed.packages.get(&raw.name);
     let version = normalized.as_ref().map(|p| p.version.clone());
+    let (requires_build_scripts, build_scripts, extra_packages) = normalized
+        .as_ref()
+        .map(|p| {
+            let build_scripts = p.source.build_scripts.clone();
+            (
+                !build_scripts.is_empty(),
+                build_scripts,
+                p.source.extra_packages.clone(),
+            )
+        })
+        .unwrap_or_else(|| (false, Vec::new(), Vec::new()));
     let outdated = match (installed_pkg, version.as_deref()) {
         (Some(inst), Some(latest)) => inst.version != latest,
         _ => false,
@@ -440,6 +457,9 @@ pub fn summary_for(
         outdated,
         deprecated: raw.deprecated,
         neovim_lspconfig: raw.neovim.as_ref().and_then(|n| n.lspconfig.clone()),
+        requires_build_scripts,
+        build_scripts,
+        extra_packages,
     }
 }
 
@@ -727,6 +747,71 @@ bin:
         assert_eq!(result[0].version.as_deref(), Some("1.0.0"));
     }
 
+    #[test]
+    fn package_summary_includes_build_metadata() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: scripted
+description: Scripted package
+languages: [Rust]
+categories: [Formatter]
+source:
+  id: pkg:generic/acme/scripted@1.0.0
+  extra_packages:
+    - left-pad
+    - npm-run-all
+  build:
+    run:
+      - npm install
+      - npm run build
+bin:
+  scripted: scripted
+"#,
+        )
+        .unwrap();
+
+        let summary = summary_for(
+            &raw,
+            &InstalledState::default(),
+            &Platform::new("linux", "x64", Some("gnu")),
+        );
+
+        assert!(summary.requires_build_scripts);
+        assert_eq!(summary.build_scripts, vec!["npm install", "npm run build"]);
+        assert_eq!(summary.extra_packages, vec!["left-pad", "npm-run-all"]);
+
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["requires_build_scripts"], true);
+        assert_eq!(
+            value["build_scripts"],
+            serde_json::json!(["npm install", "npm run build"])
+        );
+        assert_eq!(
+            value["extra_packages"],
+            serde_json::json!(["left-pad", "npm-run-all"])
+        );
+    }
+
+    #[test]
+    fn package_summary_deserializes_without_build_metadata() {
+        let summary: PackageSummary = serde_json::from_value(serde_json::json!({
+            "name": "stylua",
+            "description": null,
+            "version": "v1.0.0",
+            "languages": [],
+            "categories": [],
+            "installed": false,
+            "installed_version": null,
+            "outdated": false,
+            "deprecated": false,
+            "neovim_lspconfig": null
+        }))
+        .unwrap();
+
+        assert!(!summary.requires_build_scripts);
+        assert!(summary.build_scripts.is_empty());
+        assert!(summary.extra_packages.is_empty());
+    }
     #[test]
     fn corrupt_registry_json_errors() {
         let tmp = tempfile::tempdir().unwrap();

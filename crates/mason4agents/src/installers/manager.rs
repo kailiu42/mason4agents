@@ -1,6 +1,6 @@
 use crate::package_spec::NormalizedSource;
 use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
-use crate::types::{M4aError, Result};
+use crate::types::{command_failure_summary, command_output_for_log, M4aError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -165,13 +165,25 @@ pub fn run_install_command_with_progress(
         .output()
         .map_err(M4aError::from)
         .and_then(|output| {
+            progress.log(&format!(
+                "\n=== external manager package={} program={} status={} ===\nargs: {}\n{}",
+                package.unwrap_or("-"),
+                spec.program,
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_owned()),
+                spec.args.join(" "),
+                command_output_for_log(&output.stdout, &output.stderr)
+            ));
             if output.status.success() {
                 Ok(())
             } else {
                 Err(M4aError::CommandFailed {
                     program: spec.program.clone(),
                     status: output.status.code().unwrap_or(-1),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    summary: command_failure_summary(&output.stdout, &output.stderr),
                 })
             }
         });

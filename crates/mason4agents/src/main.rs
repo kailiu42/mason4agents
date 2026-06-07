@@ -3,7 +3,7 @@ use mason4agents::doctor::doctor;
 use mason4agents::installer::Installer;
 use mason4agents::paths::MasonPaths;
 use mason4agents::platform::Platform;
-use mason4agents::progress::{ProgressSink, StderrProgressSink};
+use mason4agents::progress::{OperationProgressSink, ProgressSink, StderrProgressSink};
 use mason4agents::registry::{
     load_or_refresh_with_progress, refresh_registry_with_progress, search_packages, PackageSummary,
     RefreshSummary,
@@ -119,10 +119,11 @@ impl Output {
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = std::env::args().collect();
+    let command_line = command_line_label(&raw_args);
     let is_json = raw_args.iter().any(|a| a == "--json");
     let progress = StderrProgressSink::new(is_json);
     match Cli::try_parse() {
-        Ok(cli) => match run(cli, &progress) {
+        Ok(cli) => match run(cli, &progress, &command_line) {
             Ok(output) => {
                 if is_json {
                     println!(
@@ -180,13 +181,72 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, progress: &dyn ProgressSink) -> Result<Output> {
+fn command_line_label(args: &[String]) -> String {
+    if args.is_empty() {
+        return "mason4agents".to_owned();
+    }
+    args.iter()
+        .map(|arg| shell_quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_owned();
+    }
+    if arg.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@')
+    }) {
+        return arg.to_owned();
+    }
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn run_logged_operation<T, F>(
+    paths: &MasonPaths,
+    progress: &dyn ProgressSink,
+    operation: &str,
+    label: &str,
+    f: F,
+) -> Result<T>
+where
+    F: FnOnce(&dyn ProgressSink) -> Result<T>,
+{
+    let sink = OperationProgressSink::new(progress, &paths.logs_dir, operation, label)?;
+    sink.log(&format!("command: {label}"));
+    match f(&sink) {
+        Ok(value) => {
+            sink.log("result: success");
+            Ok(value)
+        }
+        Err(err) => {
+            sink.log(&format!("result: error\n{err}"));
+            Err(err.with_log(sink.log_path().map(|path| path.to_path_buf())))
+        }
+    }
+}
+
+fn run(cli: Cli, progress: &dyn ProgressSink, command_line: &str) -> Result<Output> {
     let paths = MasonPaths::from_env()?;
     let platform = Platform::current();
     match cli.command {
         Command::Refresh { registry } => {
-            let result = refresh_registry_with_progress(&paths, registry.as_deref(), progress)?;
-            Ok(format_refresh(&result))
+            run_logged_operation(&paths, progress, "refresh", command_line, |progress| {
+                let result = refresh_registry_with_progress(&paths, registry.as_deref(), progress)?;
+                Ok(format_refresh(&result))
+            })
         }
         Command::Search {
             query,
@@ -259,14 +319,16 @@ fn run(cli: Cli, progress: &dyn ProgressSink) -> Result<Output> {
                     "install requires at least one package".to_owned(),
                 ));
             }
-            let installer = Installer::new(paths, platform);
-            let results = installer.install_requests_with_progress(
-                &packages,
-                registry.as_deref(),
-                allow_build_scripts,
-                progress,
-            )?;
-            Ok(format_install_results(&results))
+            run_logged_operation(&paths, progress, "install", command_line, |progress| {
+                let installer = Installer::new(paths.clone(), platform);
+                let results = installer.install_requests_with_progress(
+                    &packages,
+                    registry.as_deref(),
+                    allow_build_scripts,
+                    progress,
+                )?;
+                Ok(format_install_results(&results))
+            })
         }
         Command::Uninstall { packages } => {
             if packages.is_empty() {
@@ -274,16 +336,18 @@ fn run(cli: Cli, progress: &dyn ProgressSink) -> Result<Output> {
                     "uninstall requires at least one package".to_owned(),
                 ));
             }
-            let installer = Installer::new(paths, platform);
-            let results = installer.uninstall_with_progress(&packages, progress)?;
-            Ok(format_uninstall_results(&results))
+            run_logged_operation(&paths, progress, "uninstall", command_line, |progress| {
+                let installer = Installer::new(paths.clone(), platform);
+                let results = installer.uninstall_with_progress(&packages, progress)?;
+                Ok(format_uninstall_results(&results))
+            })
         }
         Command::Update {
             packages,
             registry,
             allow_build_scripts,
-        } => {
-            let installer = Installer::new(paths, platform);
+        } => run_logged_operation(&paths, progress, "update", command_line, |progress| {
+            let installer = Installer::new(paths.clone(), platform);
             let results = installer.update_requests_with_progress(
                 &packages,
                 registry.as_deref(),
@@ -291,7 +355,7 @@ fn run(cli: Cli, progress: &dyn ProgressSink) -> Result<Output> {
                 progress,
             )?;
             Ok(format_install_results(&results))
-        }
+        }),
         Command::Which { executable } => {
             let installer = Installer::new(paths, platform);
             let result = installer.which(&executable)?;

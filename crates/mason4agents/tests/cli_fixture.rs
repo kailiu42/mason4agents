@@ -494,13 +494,32 @@ fn cli_error_stdout_is_stable_json() {
         .success();
     let value = output_json(
         cmd(tmp.path())
-            .args(["install", "missing", "--json"])
+            .args([
+                "install",
+                "missing",
+                "--registry",
+                registry.to_str().unwrap(),
+                "--allow-build-scripts",
+                "--json",
+            ])
             .assert()
             .failure()
             .stdout(predicate::str::contains("package_not_found")),
     );
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "package_not_found");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("Full log:"));
+    let log_path = message.split("Full log: ").nth(1).unwrap().trim();
+    let log = fs::read_to_string(log_path).unwrap();
+    let first_line = log.lines().next().unwrap_or_default();
+    assert!(first_line.contains(" install missing "));
+    assert!(first_line.contains("--registry"));
+    assert!(first_line.contains(registry.to_str().unwrap()));
+    assert!(first_line.contains("--allow-build-scripts"));
+    assert!(first_line.contains("--json"));
+    assert!(log.contains("preparing package requests"));
+    assert!(log.contains("package not found: missing"));
 }
 
 #[test]
