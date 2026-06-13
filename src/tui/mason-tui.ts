@@ -816,10 +816,10 @@ function renderDetailPopup(state: MasonTuiState, baseLines: string[], width: num
   const topBorder = `╭${title}${"─".repeat(Math.max(0, popupWidth - title.length - 2))}╮`;
   const bottomBorder = `╰${"─".repeat(Math.max(0, popupWidth - 2))}╯`;
   const popupLines = [
-    styleLine(fitToWidth(topBorder, popupWidth), style.popupBorder),
-    ...contentLines.map((line, index) => {
+    styleLine(fitToWidth(topBorder, popupWidth), style.popupTitle ?? style.popupBorder),
+    ...contentLines.map((line) => {
       const bodyLine = `│ ${fitToWidth(line.trimEnd(), contentWidth)} │`;
-      return styleLine(fitToWidth(bodyLine, popupWidth), index === 0 ? style.popupTitle ?? style.popupBody : style.popupBody);
+      return styleLine(fitToWidth(bodyLine, popupWidth), style.popupBody);
     }),
     styleLine(fitToWidth(bottomBorder, popupWidth), style.popupBorder),
   ];
@@ -844,10 +844,10 @@ function renderBuildScriptConfirmationPopup(state: MasonTuiState, baseLines: str
    const topBorder = `╭${title}${"─".repeat(Math.max(0, popupWidth - title.length - 2))}╮`;
    const bottomBorder = `╰${"─".repeat(Math.max(0, popupWidth - 2))}╯`;
    const popupLines = [
-      styleLine(fitToWidth(topBorder, popupWidth), style.popupBorder),
-      ...contentLines.map((line, index) => {
+      styleLine(fitToWidth(topBorder, popupWidth), style.popupTitle ?? style.popupBorder),
+      ...contentLines.map((line) => {
          const bodyLine = `│ ${fitToWidth(line.trimEnd(), contentWidth)} │`;
-         return styleLine(fitToWidth(bodyLine, popupWidth), index === 0 ? style.popupTitle ?? style.popupBody : style.popupBody);
+         return styleLine(fitToWidth(bodyLine, popupWidth), style.popupBody);
       }),
       styleLine(fitToWidth(bottomBorder, popupWidth), style.popupBorder),
    ];
@@ -923,10 +923,10 @@ function renderProgressPopup(state: MasonTuiState, baseLines: string[], width: n
   const topBorder = `╭${title}${"─".repeat(Math.max(0, popupWidth - title.length - 2))}╮`;
   const bottomBorder = `╰${"─".repeat(Math.max(0, popupWidth - 2))}╯`;
   const popupLines = [
-    styleLine(fitToWidth(topBorder, popupWidth), style.popupBorder),
-    ...contentLines.map((line, index) => {
+    styleLine(fitToWidth(topBorder, popupWidth), style.popupTitle ?? style.popupBorder),
+    ...contentLines.map((line) => {
       const bodyLine = `│ ${fitToWidth(line.trimEnd(), contentWidth)} │`;
-      return styleLine(fitToWidth(bodyLine, popupWidth), index === 0 ? style.popupTitle ?? style.popupBody : style.popupBody);
+      return styleLine(fitToWidth(bodyLine, popupWidth), style.popupBody);
     }),
     styleLine(fitToWidth(bottomBorder, popupWidth), style.popupBorder),
   ];

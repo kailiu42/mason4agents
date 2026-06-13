@@ -363,6 +363,20 @@ describe("Mason TUI core", () => {
     expect(detail).not.toContain("[Tab/S-Tab/←→]");
     expect(detail).not.toContain("[/]: name");
     expect(detail).not.toContain("[Enter]: detail");
+
+    const detailPopupStyle = {
+      popupBorder: (text: string) => `<border>${text}</border>`,
+      popupTitle: (text: string) => `<title>${text}</title>`,
+      popupBody: (text: string) => `<body>${text}</body>`,
+    };
+    const detailLines = tui.renderLines(80, detailPopupStyle);
+    const detailTitleLine = detailLines.find((line) => line.includes("package details"));
+    const packageLine = detailLines.find((line) => line.includes("Package: stylua"));
+    expect(detailTitleLine).toContain("<title>");
+    expect(detailTitleLine).not.toContain("<body>");
+    expect(packageLine).toContain("<body>");
+    expect(packageLine).not.toContain("<border>");
+    expect(packageLine).not.toContain("<title>");
     await tui.handleInput("\x1b[27u");
     expect(tui.state.view).toBe("list");
     expect(tui.render()).not.toContain("package details");
@@ -484,6 +498,20 @@ describe("Mason TUI core", () => {
       expect(tui.render()).toContain("Scripts: ./configure, make install");
       expect(tui.render()).toContain("Extra packages: gcc, make");
       expect(calls).toEqual([["list"]]);
+
+      const buildPopupStyle = {
+        popupBorder: (text: string) => `<border>${text}</border>`,
+        popupTitle: (text: string) => `<title>${text}</title>`,
+        popupBody: (text: string) => `<body>${text}</body>`,
+      };
+      const buildLines = tui.renderLines(96, buildPopupStyle);
+      const buildTitleLine = buildLines.find((line) => line.includes("confirm build scripts"));
+      const buildIntroLine = buildLines.find((line) => line.includes("Local shell build scripts from the registry will run."));
+      expect(buildTitleLine).toContain("<title>");
+      expect(buildTitleLine).not.toContain("<body>");
+      expect(buildIntroLine).toContain("<body>");
+      expect(buildIntroLine).not.toContain("<border>");
+      expect(buildIntroLine).not.toContain("<title>");
 
       await tui.handleInput("enter");
 
@@ -700,6 +728,20 @@ describe("Mason TUI core", () => {
       expect(timedOutText).toContain("Quiet build still running.");
       expect(timedOutText).toContain("Wait; close keeps running.");
       expect(timedOutText).toContain("keeps running");
+
+    const progressPopupStyle = {
+      popupBorder: (text: string) => `<border>${text}</border>`,
+      popupTitle: (text: string) => `<title>${text}</title>`,
+      popupBody: (text: string) => `<body>${text}</body>`,
+    };
+    const progressLines = tui.renderLines(80, progressPopupStyle);
+    const styledProgressTitleLine = progressLines.find((line) => line.includes("operation progress"));
+    const activityLine = progressLines.find((line) => line.includes("Activity:"));
+    expect(styledProgressTitleLine).toContain("<title>");
+    expect(styledProgressTitleLine).not.toContain("<body>");
+    expect(activityLine).toContain("<body>");
+    expect(activityLine).not.toContain("<border>");
+    expect(activityLine).not.toContain("<title>");
     await tui.handleInput("q");
     expect(tui.render()).not.toContain("operation progress");
 
