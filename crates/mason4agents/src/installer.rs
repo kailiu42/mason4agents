@@ -1,9 +1,9 @@
-use crate::archive::{split_archive_spec, unpack_or_copy};
+use crate::archive::{is_archive_name, split_archive_spec, unpack_or_copy};
 use crate::download::{download_to_cache_with_progress, local_path};
 use crate::installers::{build, generic, github, manager, openvsx};
 use crate::linker::{cleanup_package_links, create_package_links, windows_wrapper_path};
 use crate::locks::PackageLock;
-use crate::package_spec::NormalizedPackage;
+use crate::package_spec::{AssetSpec, NormalizedPackage};
 use crate::paths::MasonPaths;
 use crate::platform::Platform;
 use crate::progress::{emit_error, NoProgressSink, ProgressSink, ProgressStatus};
@@ -11,10 +11,12 @@ use crate::registry::{load_or_refresh_with_progress, normalize_package};
 use crate::store::{InstalledPackage, InstalledState};
 use crate::types::{msg, M4aError, Result};
 use chrono::Utc;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const STATE_LOCK: &str = "_state";
 
@@ -391,15 +393,16 @@ impl Installer {
         let result = (|| -> Result<Option<InstallResult>> {
             validate_package_name(&package.name)?;
             let name = &package.name;
-            for spec in ["bins", "share", "opt"] {
-                let keys: &BTreeMap<String, String> = match spec {
-                    "bins" => &package.bins,
-                    "share" => &package.share,
-                    "opt" => &package.opt,
-                    _ => unreachable!(),
-                };
+            for key in package.bins.keys() {
+                validate_package_name(key).map_err(|_| {
+                    msg(format!(
+                        "package '{name}' has invalid key '{key}' in 'bins'"
+                    ))
+                })?;
+            }
+            for (spec, keys) in [("share", &package.share), ("opt", &package.opt)] {
                 for key in keys.keys() {
-                    validate_package_name(key).map_err(|_| {
+                    validate_link_path(key).map_err(|_| {
                         msg(format!(
                             "package '{name}' has invalid key '{key}' in '{spec}'"
                         ))
@@ -432,7 +435,6 @@ impl Installer {
                 );
                 return Ok(None);
             }
-            ensure_no_link_ownership_conflicts(&package, &state)?;
             let previous_receipt = state.packages.get(&package.name).cloned();
             let staging = self.paths.package_tmp_dir(&package.name);
             let final_dir = self.paths.package_dir(&package.name);
@@ -482,6 +484,10 @@ impl Installer {
                 Ok(())
             })();
             if let Err(err) = install_result {
+                remove_dir_if_exists(&staging)?;
+                return Err(err);
+            }
+            if let Err(err) = ensure_active_link_ownership_conflicts(&package, &state, &staging) {
                 remove_dir_if_exists(&staging)?;
                 return Err(err);
             }
@@ -644,7 +650,15 @@ fn install_source_with_progress(
         ))),
     }
 }
-fn asset_file_specs<'a>(package: &'a NormalizedPackage, source_type: &str) -> Result<Vec<&'a str>> {
+struct AssetFileSpec<'a> {
+    locator: &'a str,
+    output_name: Option<&'a str>,
+}
+
+fn asset_file_specs<'a>(
+    package: &'a NormalizedPackage,
+    source_type: &str,
+) -> Result<Vec<AssetFileSpec<'a>>> {
     let asset = package.source.asset.as_ref().ok_or_else(|| {
         msg(format!(
             "{source_type} package {} has no selected asset",
@@ -658,9 +672,29 @@ fn asset_file_specs<'a>(package: &'a NormalizedPackage, source_type: &str) -> Re
         ))
     })?;
     let mut files = Vec::with_capacity(1 + asset.extra_files.len());
-    files.push(file_spec);
-    files.extend(asset.extra_files.iter().map(String::as_str));
+    files.push(AssetFileSpec {
+        locator: file_spec,
+        output_name: asset_file_name(asset, 0),
+    });
+    files.extend(
+        asset
+            .extra_files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| AssetFileSpec {
+                locator: file.as_str(),
+                output_name: asset_file_name(asset, index + 1),
+            }),
+    );
     Ok(files)
+}
+
+fn asset_file_name(asset: &AssetSpec, index: usize) -> Option<&str> {
+    if asset.file_names.len() == 1 + asset.extra_files.len() {
+        asset.file_names.get(index).map(String::as_str)
+    } else {
+        None
+    }
 }
 
 fn install_asset_file_specs_with_progress<F>(
@@ -675,8 +709,9 @@ fn install_asset_file_specs_with_progress<F>(
 where
     F: FnMut(&str) -> Result<String>,
 {
+    let mut staged_outputs = HashSet::new();
     for file_spec in asset_file_specs(package, source_type)? {
-        let (file, strip_prefix) = split_archive_spec(file_spec);
+        let (file, strip_prefix) = split_archive_spec(file_spec.locator);
         let locator = resolve_locator(file)?;
         let downloaded = download_to_cache_with_progress(
             &locator,
@@ -685,14 +720,24 @@ where
             Some(&package.name),
             progress,
         )?;
-        unpack_or_copy_with_progress(
+        let temp_parent = staging
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(staging);
+        fs::create_dir_all(temp_parent)?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix(".m4a-asset-")
+            .tempdir_in(temp_parent)?;
+        unpack_or_copy_asset_with_progress(
             &downloaded,
-            staging,
+            temp_dir.path(),
             strip_prefix,
+            file_spec.output_name,
             operation,
             Some(&package.name),
             progress,
         )?;
+        merge_asset_outputs(temp_dir.path(), staging, &mut staged_outputs)?;
     }
     Ok(())
 }
@@ -877,6 +922,186 @@ fn install_with_manager_with_progress(
     manager::run_install_command_with_progress(&spec, operation, Some(&package.name), progress)
 }
 
+fn unpack_or_copy_asset_with_progress(
+    path: &Path,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+    output_name: Option<&str>,
+    operation: &str,
+    package: Option<&str>,
+    progress: &dyn ProgressSink,
+) -> Result<()> {
+    progress.event(
+        operation,
+        "unpack",
+        ProgressStatus::Started,
+        package,
+        "unpacking package source",
+    );
+    let result = unpack_or_copy_asset(path, dest, strip_prefix, output_name);
+    match &result {
+        Ok(()) => progress.event(
+            operation,
+            "unpack",
+            ProgressStatus::Succeeded,
+            package,
+            "package source unpacked",
+        ),
+        Err(err) => emit_error(progress, operation, "unpack", package, err),
+    }
+    result
+}
+
+fn unpack_or_copy_asset(
+    path: &Path,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+    output_name: Option<&str>,
+) -> Result<()> {
+    let Some(output_name) = output_name else {
+        return unpack_or_copy(path, dest, strip_prefix);
+    };
+    if strip_prefix.is_none() && is_single_gzip_name(output_name) {
+        return unpack_named_gzip(path, dest, output_name);
+    }
+    if strip_prefix.is_none() && !is_archive_name(output_name) {
+        return copy_downloaded_file(path, dest, output_name);
+    }
+    unpack_named_download(path, dest, strip_prefix, output_name)
+}
+fn merge_asset_outputs(
+    source: &Path,
+    dest: &Path,
+    staged_outputs: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let (dirs, files) = collect_asset_outputs(source)?;
+    for relative in &dirs {
+        if dest.join(relative).is_file() {
+            return Err(msg(format!(
+                "asset output path collision: {}",
+                relative.display()
+            )));
+        }
+    }
+    for relative in &files {
+        if !staged_outputs.insert(relative.clone()) || dest.join(relative).exists() {
+            return Err(msg(format!(
+                "asset output path collision: {}",
+                relative.display()
+            )));
+        }
+    }
+    for relative in dirs {
+        fs::create_dir_all(dest.join(relative))?;
+    }
+    for relative in files {
+        let from = source.join(&relative);
+        let to = dest.join(&relative);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(from, to)?;
+    }
+    Ok(())
+}
+
+fn collect_asset_outputs(root: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    collect_asset_outputs_from(root, root, &mut dirs, &mut files)?;
+    Ok((dirs, files))
+}
+
+fn collect_asset_outputs_from(
+    root: &Path,
+    dir: &Path,
+    dirs: &mut Vec<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| msg(format!("asset output escaped {}", root.display())))?
+            .to_path_buf();
+        if file_type.is_dir() {
+            dirs.push(relative);
+            collect_asset_outputs_from(root, &path, dirs, files)?;
+        } else if file_type.is_file() {
+            files.push(relative);
+        }
+    }
+    Ok(())
+}
+
+fn copy_downloaded_file(path: &Path, dest: &Path, output_name: &str) -> Result<()> {
+    let relative = normalized_link_path(output_name)?;
+    let output = dest.join(&relative);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(path, output)?;
+    Ok(())
+}
+fn is_single_gzip_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".gz") && !lower.ends_with(".tar.gz") && !lower.ends_with(".tgz")
+}
+
+fn unpack_named_gzip(path: &Path, dest: &Path, output_name: &str) -> Result<()> {
+    let relative = normalized_link_path(output_name)?;
+    let stem = relative
+        .file_stem()
+        .ok_or_else(|| msg(format!("gzip output path has no stem: {output_name}")))?;
+    let output_relative = relative.with_file_name(stem);
+    let output = dest.join(output_relative);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::open(path)?;
+    let mut decoder = GzDecoder::new(file);
+    let mut output = fs::File::create(output)?;
+    std::io::copy(&mut decoder, &mut output)?;
+    Ok(())
+}
+
+fn unpack_named_download(
+    path: &Path,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+    output_name: &str,
+) -> Result<()> {
+    let relative = normalized_link_path(output_name)?;
+    let output_file_name = relative.file_name().ok_or_else(|| {
+        msg(format!(
+            "download output path has no filename: {output_name}"
+        ))
+    })?;
+    let temp_file_name = named_download_temp_file_name(path, output_file_name);
+    fs::create_dir_all(dest)?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".m4a-download-")
+        .tempdir_in(dest)?;
+    let named = temp_dir.path().join(temp_file_name);
+    fs::copy(path, &named)?;
+    unpack_or_copy(&named, dest, strip_prefix)
+}
+
+fn named_download_temp_file_name<'a>(path: &'a Path, output_file_name: &'a OsStr) -> &'a OsStr {
+    let source_file_name = path.file_name().unwrap_or(output_file_name);
+    if source_file_name.to_str().is_some_and(is_archive_name)
+        && output_file_name
+            .to_str()
+            .is_none_or(|name| !is_archive_name(name))
+    {
+        source_file_name
+    } else {
+        output_file_name
+    }
+}
+
 fn unpack_or_copy_with_progress(
     path: &Path,
     dest: &Path,
@@ -966,27 +1191,36 @@ fn finalize_pending_uninstalls(pending: &[PendingUninstall]) -> Result<()> {
     Ok(())
 }
 
-fn ensure_no_link_ownership_conflicts(
+fn ensure_active_link_ownership_conflicts(
     package: &NormalizedPackage,
     state: &InstalledState,
+    package_dir: &Path,
 ) -> Result<()> {
-    let mut conflicts = Vec::new();
+    let mut conflicts = BTreeSet::new();
     collect_link_ownership_conflicts("bin", &package.bins, &package.name, state, &mut conflicts);
-    collect_link_ownership_conflicts(
+    collect_normalized_link_ownership_conflicts(
         "share",
         &package.share,
         &package.name,
         state,
+        package_dir,
         &mut conflicts,
-    );
-    collect_link_ownership_conflicts("opt", &package.opt, &package.name, state, &mut conflicts);
+    )?;
+    collect_normalized_link_ownership_conflicts(
+        "opt",
+        &package.opt,
+        &package.name,
+        state,
+        package_dir,
+        &mut conflicts,
+    )?;
     if conflicts.is_empty() {
         return Ok(());
     }
     Err(msg(format!(
         "cannot install package '{}': link name conflicts with installed package(s): {}. Uninstall the owning package or remove the conflicting link name before retrying.",
         package.name,
-        conflicts.join(", ")
+        conflicts.into_iter().collect::<Vec<_>>().join(", ")
     )))
 }
 
@@ -995,7 +1229,7 @@ fn collect_link_ownership_conflicts(
     requested: &BTreeMap<String, String>,
     package_name: &str,
     state: &InstalledState,
-    conflicts: &mut Vec<String>,
+    conflicts: &mut BTreeSet<String>,
 ) {
     for (owner_name, installed) in &state.packages {
         if owner_name == package_name {
@@ -1004,16 +1238,84 @@ fn collect_link_ownership_conflicts(
         for name in requested.keys() {
             let owned = match kind {
                 "bin" => installed.bins.contains_key(name),
-                "share" => installed.share.contains_key(name),
-                "opt" => installed.opt.contains_key(name),
                 _ => unreachable!(),
             };
             if owned {
-                conflicts.push(format!("{kind} '{name}' is owned by '{owner_name}'"));
+                conflicts.insert(format!("{kind} '{name}' is owned by '{owner_name}'"));
             }
         }
     }
 }
+
+fn collect_normalized_link_ownership_conflicts(
+    kind: &str,
+    requested: &BTreeMap<String, String>,
+    package_name: &str,
+    state: &InstalledState,
+    package_dir: &Path,
+    conflicts: &mut BTreeSet<String>,
+) -> Result<()> {
+    let requested_paths = collect_active_normalized_link_paths(requested, package_dir)?;
+    for (owner_name, installed) in &state.packages {
+        if owner_name == package_name {
+            continue;
+        }
+        let installed_paths = collect_normalized_link_paths(match kind {
+            "share" => &installed.share,
+            "opt" => &installed.opt,
+            _ => unreachable!(),
+        })?;
+        for (requested_name, requested_path) in &requested_paths {
+            for (owned_name, owned_path) in &installed_paths {
+                if link_paths_conflict(requested_path, owned_path) {
+                    let message = if requested_path == owned_path {
+                        format!("{kind} '{requested_name}' is owned by '{owner_name}'")
+                    } else {
+                        format!(
+                            "{kind} '{requested_name}' conflicts with '{owned_name}' owned by '{owner_name}'"
+                        )
+                    };
+                    conflicts.insert(message);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_normalized_link_paths(
+    entries: &BTreeMap<String, String>,
+) -> Result<Vec<(String, PathBuf)>> {
+    entries
+        .keys()
+        .map(|name| Ok((name.clone(), normalized_link_path(name)?)))
+        .collect()
+}
+
+fn collect_active_normalized_link_paths(
+    entries: &BTreeMap<String, String>,
+    package_dir: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    entries
+        .iter()
+        .filter_map(|(name, rel)| {
+            let source = package_dir.join(rel);
+            link_source_is_active(&source, package_dir)
+                .then(|| Ok((name.clone(), normalized_link_path(name)?)))
+        })
+        .collect()
+}
+
+fn link_source_is_active(source: &Path, package_dir: &Path) -> bool {
+    if !source.exists() {
+        return false;
+    }
+    let (Ok(source), Ok(package_dir)) = (source.canonicalize(), package_dir.canonicalize()) else {
+        return false;
+    };
+    source.starts_with(package_dir)
+}
+
 fn rollback_committed_install(
     paths: &MasonPaths,
     installed: &InstalledPackage,
@@ -1065,6 +1367,60 @@ pub(crate) fn validate_package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a safe relative link path under the managed share/opt directories.
+///
+/// Unlike executable names, share and opt keys may contain `/` so packages can
+/// expose nested runtime paths such as `jdtls/config/`. They must still remain
+/// relative and must not contain traversal, Windows prefixes, or separators that
+/// behave differently across platforms.
+pub(crate) fn validate_link_path(path: &str) -> Result<()> {
+    normalized_link_path(path).map(|_| ())
+}
+
+pub(crate) fn normalized_link_path(path: &str) -> Result<PathBuf> {
+    if path.is_empty() {
+        return Err(msg("link path must not be empty"));
+    }
+    if path.contains('\\') || path.contains(':') {
+        return Err(msg(format!(
+            "link path '{path}' must not contain backslashes or drive separators"
+        )));
+    }
+    let raw = Path::new(path);
+    if raw.is_absolute() {
+        return Err(msg(format!(
+            "link path '{}' must be relative",
+            raw.display()
+        )));
+    }
+    let mut normalized = PathBuf::new();
+    for segment in raw.components() {
+        match segment {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir | Component::ParentDir => {
+                return Err(msg(format!(
+                    "link path '{}' must not contain traversal segments",
+                    raw.display()
+                )));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(msg(format!(
+                    "link path '{}' must be relative",
+                    raw.display()
+                )));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(msg("link path must not be empty"));
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn link_paths_conflict(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,6 +1434,7 @@ mod tests {
 
     fn paths(root: &Path) -> MasonPaths {
         let mut env = HashMap::new();
+
         env.insert("HOME".to_owned(), OsString::from(root));
         env.insert(
             "MASON4AGENTS_DATA_HOME".to_owned(),
@@ -1092,6 +1449,186 @@ mod tests {
             OsString::from(root.join("state")),
         );
         MasonPaths::from_getter(|key| env.get(key).cloned()).unwrap()
+    }
+
+    #[test]
+    fn copies_download_file_map_entries_to_declared_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let downloaded = tmp.path().join("cache-file");
+        fs::write(&downloaded, b"jar").unwrap();
+        let staging = tmp.path().join("staging");
+
+        unpack_or_copy_asset(&downloaded, &staging, None, Some("jdtls/lombok.jar")).unwrap();
+
+        assert_eq!(fs::read(staging.join("jdtls/lombok.jar")).unwrap(), b"jar");
+        let gz_path = tmp.path().join("tool-cache");
+        {
+            let file = fs::File::create(&gz_path).unwrap();
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            encoder.write_all(b"tool").unwrap();
+            encoder.finish().unwrap();
+        }
+        unpack_or_copy_asset(&gz_path, &staging, None, Some("bin/tool.gz")).unwrap();
+        assert_eq!(fs::read(staging.join("bin/tool")).unwrap(), b"tool");
+        let zip_path = tmp.path().join("tool.zip");
+        write_zip_with_content(&zip_path, b"#!/bin/sh\necho tool\n");
+        unpack_or_copy_asset(&zip_path, &staging, Some("pkg/bin"), Some("tool")).unwrap();
+        assert_eq!(
+            fs::read(staging.join("hello")).unwrap(),
+            b"#!/bin/sh\necho tool\n"
+        );
+        assert!(unpack_or_copy_asset(&downloaded, &staging, None, Some("../evil")).is_err());
+    }
+    #[test]
+    fn rejects_cross_asset_output_path_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let mut staged_outputs = HashSet::new();
+
+        let archive_path = tmp.path().join("tool.zip");
+        write_zip_with_content(&archive_path, b"#!/bin/sh\necho archive\n");
+        let first = tmp.path().join("first");
+        unpack_or_copy_asset(&archive_path, &first, Some("pkg/bin"), Some("tool")).unwrap();
+        merge_asset_outputs(&first, &staging, &mut staged_outputs).unwrap();
+        assert_eq!(
+            fs::read(staging.join("hello")).unwrap(),
+            b"#!/bin/sh\necho archive\n"
+        );
+
+        let downloaded = tmp.path().join("cache-file");
+        fs::write(&downloaded, b"plain").unwrap();
+        let second = tmp.path().join("second");
+        unpack_or_copy_asset(&downloaded, &second, None, Some("hello")).unwrap();
+        let err = merge_asset_outputs(&second, &staging, &mut staged_outputs).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("asset output path collision: hello"));
+        assert_eq!(
+            fs::read(staging.join("hello")).unwrap(),
+            b"#!/bin/sh\necho archive\n"
+        );
+    }
+
+    #[test]
+    fn validates_nested_share_and_opt_link_paths() {
+        validate_link_path("jdtls/config/").unwrap();
+        validate_link_path("jdtls/lombok.jar").unwrap();
+
+        assert!(validate_link_path("").is_err());
+        assert!(validate_link_path("../jdtls").is_err());
+        assert!(validate_link_path("jdtls/../config").is_err());
+        assert!(validate_link_path("/jdtls/config").is_err());
+        assert!(validate_link_path("jdtls\\config").is_err());
+        assert!(validate_link_path("C:/jdtls/config").is_err());
+    }
+
+    #[test]
+    fn rejects_conflicting_nested_share_paths_owned_by_other_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let package_dir = tmp.path().join("package");
+        fs::create_dir_all(package_dir.join("config_linux")).unwrap();
+        fs::create_dir_all(package_dir.join("plugins")).unwrap();
+        let mut state = InstalledState::default();
+        state.packages.insert(
+            "owner".to_owned(),
+            InstalledPackage {
+                name: "owner".to_owned(),
+                version: "1.0.0".to_owned(),
+                source_id: "pkg:generic/acme/owner@1.0.0".to_owned(),
+                bins: BTreeMap::new(),
+                share: BTreeMap::from([("jdtls".to_owned(), "config".to_owned())]),
+                opt: BTreeMap::from([("jdtls/plugins".to_owned(), "plugins".to_owned())]),
+                installed_at: Utc::now(),
+            },
+        );
+        let package = NormalizedPackage {
+            name: "jdtls".to_owned(),
+            version: "1.0.0".to_owned(),
+            description: None,
+            languages: vec!["Java".to_owned()],
+            categories: vec!["LSP".to_owned()],
+            deprecated: false,
+            source: NormalizedSource {
+                id: "pkg:generic/eclipse/eclipse.jdt.ls@1.0.0".to_owned(),
+                source_type: "generic".to_owned(),
+                namespace: None,
+                package: "jdtls".to_owned(),
+                version: "1.0.0".to_owned(),
+                asset: None,
+                extra_packages: Vec::new(),
+                build_scripts: Vec::new(),
+                qualifiers: BTreeMap::new(),
+                subpath: None,
+                build: None,
+                download: None,
+            },
+            bins: BTreeMap::new(),
+            share: BTreeMap::from([("jdtls/config/".to_owned(), "config_linux".to_owned())]),
+            opt: BTreeMap::from([("jdtls".to_owned(), "plugins".to_owned())]),
+            neovim_lspconfig: None,
+        };
+
+        let err =
+            ensure_active_link_ownership_conflicts(&package, &state, &package_dir).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("share 'jdtls/config/' conflicts with 'jdtls' owned by 'owner'"));
+        assert!(err
+            .to_string()
+            .contains("opt 'jdtls' conflicts with 'jdtls/plugins' owned by 'owner'"));
+    }
+
+    #[test]
+    fn preflight_ignores_requested_parent_links_that_may_be_inactive() {
+        let mut state = InstalledState::default();
+        state.packages.insert(
+            "owner".to_owned(),
+            InstalledPackage {
+                name: "owner".to_owned(),
+                version: "1.0.0".to_owned(),
+                source_id: "pkg:generic/acme/owner@1.0.0".to_owned(),
+                bins: BTreeMap::new(),
+                share: BTreeMap::from([("jdtls/plugins".to_owned(), "plugins".to_owned())]),
+                opt: BTreeMap::new(),
+                installed_at: Utc::now(),
+            },
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let package_dir = tmp.path().join("package");
+        fs::create_dir_all(package_dir.join("config_linux")).unwrap();
+        let package = NormalizedPackage {
+            name: "jdtls".to_owned(),
+            version: "1.0.0".to_owned(),
+            description: None,
+            languages: vec!["Java".to_owned()],
+            categories: vec!["LSP".to_owned()],
+            deprecated: false,
+            source: NormalizedSource {
+                id: "pkg:generic/eclipse/eclipse.jdt.ls@1.0.0".to_owned(),
+                source_type: "generic".to_owned(),
+                namespace: None,
+                package: "jdtls".to_owned(),
+                version: "1.0.0".to_owned(),
+                asset: None,
+                extra_packages: Vec::new(),
+                build_scripts: Vec::new(),
+                qualifiers: BTreeMap::new(),
+                subpath: None,
+                build: None,
+                download: None,
+            },
+            bins: BTreeMap::new(),
+            share: BTreeMap::from([
+                ("jdtls".to_owned(), "missing".to_owned()),
+                ("jdtls/config".to_owned(), "config_linux".to_owned()),
+            ]),
+            opt: BTreeMap::new(),
+            neovim_lspconfig: None,
+        };
+
+        ensure_active_link_ownership_conflicts(&package, &state, &package_dir).unwrap();
     }
 
     fn write_zip_with_content(path: &Path, content: &[u8]) {
@@ -1111,6 +1648,14 @@ mod tests {
 
     fn write_zip(path: &Path) {
         write_zip_with_content(path, b"#!/bin/sh\necho hello\n");
+    }
+    fn write_bin_only_zip(path: &Path) {
+        let file = fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("pkg/bin/hello", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"#!/bin/sh\necho hello\n").unwrap();
+        zip.finish().unwrap();
     }
 
     fn write_share_zip(path: &Path) {
@@ -1382,7 +1927,7 @@ share:
         let tmp = tempfile::tempdir().unwrap();
         let paths = paths(tmp.path());
         let binary_archive = tmp.path().join("hello-bin.zip");
-        write_zip(&binary_archive);
+        write_bin_only_zip(&binary_archive);
         let share_archive = tmp.path().join("hello-share.zip");
         write_share_zip(&share_archive);
         let registry = write_multi_asset_registry(tmp.path(), &binary_archive, &share_archive);
@@ -1522,6 +2067,7 @@ share:
                     target: None,
                     file: Some("missing.zip".to_owned()),
                     extra_files: Vec::new(),
+                    file_names: Vec::new(),
                     bin: None,
                     extra: BTreeMap::new(),
                 }),
@@ -1571,6 +2117,7 @@ share:
                 target: None,
                 file: Some("java-language-server.zip".to_owned()),
                 extra_files: Vec::new(),
+                file_names: Vec::new(),
                 bin: None,
                 extra: BTreeMap::new(),
             }),

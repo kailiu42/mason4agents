@@ -107,15 +107,19 @@ pub struct AssetSpec {
     pub file: Option<String>,
     #[serde(default)]
     pub extra_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_names: Vec<String>,
     pub bin: Option<String>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DownloadEntry {
     pub target: Option<String>,
     pub file: String,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl RawPackageSpec {
@@ -136,7 +140,7 @@ impl RawPackageSpec {
             ))
         })?;
         let source_id = rebuild_id_with_version(&selected_source.id, &version);
-        let asset = select_asset(
+        let mut asset = select_asset(
             &self.name,
             &selected_source.asset,
             platform,
@@ -153,16 +157,41 @@ impl RawPackageSpec {
                 });
             }
         }
-        let download = selected_source
+        let download_selection = selected_source
             .download
             .as_ref()
-            .map(|raw| select_download_entry(raw, platform, &self.name))
+            .map(|raw| {
+                select_download_entry(
+                    raw,
+                    platform,
+                    &self.name,
+                    &version,
+                    &source_id,
+                    asset.as_ref(),
+                )
+            })
             .transpose()?
             .flatten();
+        if let Some(download_asset) = download_selection
+            .as_ref()
+            .and_then(|selection| selection.asset.as_ref())
+        {
+            asset = Some(match asset {
+                Some(existing) => merge_download_asset_files(existing, download_asset),
+                None => download_asset.clone(),
+            });
+        }
+        let download = download_selection.map(|selection| selection.entry);
         let selected_build = select_build(&selected_source.build, platform);
         let build_scripts = extract_build_scripts(selected_build.as_ref(), platform);
         // Build initial context (without source.build) to render the build spec itself.
-        let initial_context = context_for(&version, &source_id, asset.as_ref(), None);
+        let initial_context = context_for(
+            &version,
+            &source_id,
+            asset.as_ref(),
+            download.as_ref(),
+            None,
+        );
         let rendered_build = selected_build
             .as_ref()
             .map(|raw| {
@@ -177,6 +206,7 @@ impl RawPackageSpec {
             &version,
             &source_id,
             asset.as_ref(),
+            download.as_ref(),
             rendered_build.as_ref(),
         );
         let bins = render_map(&self.bin, &context)?;
@@ -417,7 +447,8 @@ fn select_asset(
         return Ok(None);
     };
     let json_value = serde_json::to_value(raw)?;
-    let selected = match json_value {
+    let mut selected_target: Option<String> = None;
+    let mut selected = match json_value {
         Value::Array(items) => {
             let candidates = platform.candidates();
             let mut matched_item = None;
@@ -436,10 +467,11 @@ fn select_asset(
                     }
                     _ => continue,
                 };
-                if item_targets
+                if let Some(candidate) = candidates
                     .iter()
-                    .any(|target| candidates.iter().any(|candidate| candidate == target))
+                    .find(|candidate| item_targets.contains(&candidate.as_str()))
                 {
+                    selected_target = Some(candidate.clone());
                     matched_item = Some(item.clone());
                     break;
                 }
@@ -457,22 +489,26 @@ fn select_asset(
         Value::Object(map) => {
             if let Some(targets) = parse_asset_targets(package, map.get("target"))? {
                 let candidates = platform.candidates();
-                if !targets
+                let Some(candidate) = candidates
                     .iter()
-                    .any(|target| candidates.iter().any(|candidate| candidate == target))
-                {
+                    .find(|candidate| targets.iter().any(|target| target == *candidate))
+                else {
                     return Err(M4aError::UnsupportedTarget {
                         package: package.to_owned(),
                         targets,
                     });
-                }
+                };
+                selected_target = Some(candidate.clone());
             }
             Value::Object(map)
         }
         Value::Null => return Ok(None),
         _ => return Err(msg(format!("invalid source.asset for package {package}"))),
     };
-    asset_from_json(selected, version, source_id).map(Some)
+    if let (Some(target), Value::Object(map)) = (&selected_target, &mut selected) {
+        map.insert("target".to_owned(), Value::String(target.clone()));
+    }
+    asset_from_json(selected, version, source_id, None).map(Some)
 }
 
 fn parse_asset_targets(package: &str, value: Option<&Value>) -> Result<Option<Vec<String>>> {
@@ -498,7 +534,12 @@ fn parse_asset_targets(package: &str, value: Option<&Value>) -> Result<Option<Ve
     }
 }
 
-fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<AssetSpec> {
+fn asset_from_json(
+    value: Value,
+    version: &str,
+    source_id: &str,
+    download: Option<&DownloadEntry>,
+) -> Result<AssetSpec> {
     let Value::Object(map) = value else {
         return Err(msg("asset must be an object"));
     };
@@ -516,18 +557,26 @@ fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<Asset
         }
         _ => (None, Vec::new()),
     };
+    let file_names = match map.get("file_names") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
     let preliminary = AssetSpec {
         target: map.get("target").and_then(Value::as_str).map(str::to_owned),
         file,
         extra_files,
+        file_names,
         bin: map.get("bin").and_then(Value::as_str).map(str::to_owned),
         extra: map
             .iter()
-            .filter(|(k, _)| *k != "target" && *k != "file" && *k != "bin")
+            .filter(|(k, _)| *k != "target" && *k != "file" && *k != "file_names" && *k != "bin")
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     };
-    let context = context_for(version, source_id, Some(&preliminary), None);
+    let context = context_for(version, source_id, Some(&preliminary), download, None);
     let mut rendered = preliminary.clone();
     rendered.file = match rendered.file.as_deref() {
         Some(s) => Some(render_template(s, &context)?),
@@ -538,16 +587,26 @@ fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<Asset
         .iter()
         .map(|f| render_template(f, &context))
         .collect::<Result<Vec<String>>>()?;
+    rendered.file_names = rendered
+        .file_names
+        .iter()
+        .map(|f| render_template(f, &context))
+        .collect::<Result<Vec<String>>>()?;
     rendered.bin = match rendered.bin.as_deref() {
         Some(s) => Some(render_template(s, &context)?),
         None => None,
     };
-    let context = context_for(version, source_id, Some(&rendered), None);
+    let context = context_for(version, source_id, Some(&rendered), download, None);
     if let Some(file) = rendered.file.as_deref() {
         rendered.file = Some(render_template(file, &context)?);
     }
     rendered.extra_files = rendered
         .extra_files
+        .iter()
+        .map(|f| render_template(f, &context))
+        .collect::<Result<Vec<String>>>()?;
+    rendered.file_names = rendered
+        .file_names
         .iter()
         .map(|f| render_template(f, &context))
         .collect::<Result<Vec<String>>>()?;
@@ -562,52 +621,73 @@ fn asset_from_json(value: Value, version: &str, source_id: &str) -> Result<Asset
         .collect::<Result<BTreeMap<String, Value>>>()?;
     Ok(rendered)
 }
+fn merge_download_asset_files(mut asset: AssetSpec, download_asset: &AssetSpec) -> AssetSpec {
+    if asset.target.is_none() {
+        asset.target = download_asset.target.clone();
+    }
+    asset.file = download_asset.file.clone();
+    asset.extra_files = download_asset.extra_files.clone();
+    asset.file_names = download_asset.file_names.clone();
+    for (key, value) in &download_asset.extra {
+        asset
+            .extra
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    asset
+}
+
+struct SelectedDownload {
+    entry: DownloadEntry,
+    asset: Option<AssetSpec>,
+}
 
 fn select_download_entry(
     raw: &serde_yaml::Value,
     platform: &Platform,
     package: &str,
-) -> Result<Option<DownloadEntry>> {
-    // null → None
+    version: &str,
+    source_id: &str,
+    asset: Option<&AssetSpec>,
+) -> Result<Option<SelectedDownload>> {
     if raw.is_null() {
         return Ok(None);
     }
     let json_value = serde_json::to_value(raw)?;
-    // Resolve items: if object with "files" key, use that; if array, use directly
     let items = match &json_value {
-        Value::Object(map) => map
-            .get("files")
-            .ok_or_else(|| msg("source.download object must have a 'files' key"))?,
-        Value::Array(_arr) => &json_value,
-        _ => return Err(msg("source.download must be an array, an object, or null")),
-    };
-    let items = match items {
+        Value::Object(map) => match map.get("files") {
+            Some(Value::Array(arr)) => arr.clone(),
+            _ => vec![json_value.clone()],
+        },
         Value::Array(arr) => arr.clone(),
-        _ => return Err(msg("source.download entries must be an array")),
+        _ => return Err(msg("source.download must be an array, an object, or null")),
     };
     if items.is_empty() {
         return Ok(None);
     }
-    // Single entry with no target: unconditional match
-    if items.len() == 1 && items[0].get("target").and_then(Value::as_str).is_none() {
-        let entry = &items[0];
-        let file = entry
-            .get("file")
-            .or_else(|| entry.get("url"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| msg("download entry missing 'file' or 'url' field"))?
-            .to_owned();
-        return Ok(Some(DownloadEntry { target: None, file }));
+    if items.len() == 1 && items[0].get("target").is_none() {
+        return selected_download_from_item(&items[0], None, version, source_id, asset).map(Some);
     }
-    // Multiple entries: select by platform target
+
     let mut targets = BTreeMap::new();
     for item in &items {
-        let Some(target) = item.get("target").and_then(Value::as_str) else {
+        let item_targets: Vec<&str> = match item.get("target") {
+            Some(Value::String(target)) => vec![target.as_str()],
+            Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
+            _ => {
+                return Err(msg(
+                    "download entry with multiple files must each have a 'target' field",
+                ))
+            }
+        };
+        if item_targets.is_empty() {
             return Err(msg(
                 "download entry with multiple files must each have a 'target' field",
             ));
-        };
-        targets.insert(target.to_owned(), item.clone());
+        }
+        for target in item_targets {
+            targets.insert(target.to_owned(), item.clone());
+        }
     }
     let Some((matched_target, item)) = platform.select(&targets) else {
         return Err(M4aError::UnsupportedTarget {
@@ -615,16 +695,101 @@ fn select_download_entry(
             targets: targets.keys().cloned().collect(),
         });
     };
-    let file = item
-        .get("file")
-        .or_else(|| item.get("url"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| msg("download entry missing 'file' or 'url' field"))?
-        .to_owned();
-    Ok(Some(DownloadEntry {
-        target: Some(matched_target.to_owned()),
-        file,
-    }))
+    selected_download_from_item(item, Some(matched_target), version, source_id, asset).map(Some)
+}
+
+fn selected_download_from_item(
+    item: &Value,
+    matched_target: Option<&str>,
+    version: &str,
+    source_id: &str,
+    asset: Option<&AssetSpec>,
+) -> Result<SelectedDownload> {
+    let Value::Object(map) = item else {
+        return Err(msg("download entry must be an object"));
+    };
+    let mut extra = BTreeMap::new();
+    for (key, value) in map {
+        if key != "target" && key != "file" && key != "url" && key != "files" {
+            extra.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(files) = map.get("files").and_then(Value::as_object) {
+        let mut file_values = Vec::new();
+        let mut file_names = Vec::new();
+        for (name, value) in files {
+            let Some(file) = value.as_str() else {
+                continue;
+            };
+            file_names.push(name.clone());
+            file_values.push(Value::String(file.to_owned()));
+        }
+        let Some(file) = file_values
+            .first()
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return Err(msg("download entry missing file entries"));
+        };
+        let preliminary = DownloadEntry {
+            target: matched_target.map(str::to_owned),
+            file,
+            extra,
+        };
+        let entry = render_download_entry(&preliminary, version, source_id, asset)?;
+        let mut asset_map = Map::new();
+        if let Some(target) = matched_target {
+            asset_map.insert("target".to_owned(), Value::String(target.to_owned()));
+        }
+        asset_map.insert("file".to_owned(), Value::Array(file_values));
+        asset_map.insert("file_names".to_owned(), json!(file_names));
+        for (key, value) in &entry.extra {
+            asset_map.insert(key.clone(), value.clone());
+        }
+        let asset = asset_from_json(Value::Object(asset_map), version, source_id, Some(&entry))
+            .map(Some)?;
+        return Ok(SelectedDownload { entry, asset });
+    }
+
+    let preliminary = DownloadEntry {
+        target: matched_target.map(str::to_owned),
+        file: map
+            .get("file")
+            .or_else(|| map.get("url"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| msg("download entry missing 'file' or 'url' field"))?
+            .to_owned(),
+        extra,
+    };
+    Ok(SelectedDownload {
+        entry: render_download_entry(&preliminary, version, source_id, asset)?,
+        asset: None,
+    })
+}
+
+fn render_download_entry(
+    entry: &DownloadEntry,
+    version: &str,
+    source_id: &str,
+    asset: Option<&AssetSpec>,
+) -> Result<DownloadEntry> {
+    let initial_context = context_for(version, source_id, asset, Some(entry), None);
+    let mut rendered = entry.clone();
+    rendered.file = render_template(&rendered.file, &initial_context)?;
+    rendered.extra = rendered
+        .extra
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), render_value_deep(value, &initial_context)?)))
+        .collect::<Result<BTreeMap<String, Value>>>()?;
+
+    let rendered_context = context_for(version, source_id, asset, Some(&rendered), None);
+    rendered.file = render_template(&rendered.file, &rendered_context)?;
+    rendered.extra = rendered
+        .extra
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), render_value_deep(value, &rendered_context)?)))
+        .collect::<Result<BTreeMap<String, Value>>>()?;
+    Ok(rendered)
 }
 
 fn render_value_deep(value: &Value, context: &Value) -> Result<Value> {
@@ -656,6 +821,7 @@ fn context_for(
     version: &str,
     source_id: &str,
     asset: Option<&AssetSpec>,
+    download: Option<&DownloadEntry>,
     build: Option<&Value>,
 ) -> Value {
     let asset_json = match asset {
@@ -671,6 +837,9 @@ fn context_for(
             if !asset.extra_files.is_empty() {
                 obj.insert("extra_files".to_owned(), json!(asset.extra_files));
             }
+            if !asset.file_names.is_empty() {
+                obj.insert("file_names".to_owned(), json!(asset.file_names));
+            }
             if let Some(ref bin) = asset.bin {
                 obj.insert("bin".to_owned(), json!(bin));
             }
@@ -682,9 +851,24 @@ fn context_for(
         }
         None => Value::Null,
     };
+    let download_json = match download {
+        Some(download) => {
+            let mut obj = Map::new();
+            if let Some(ref target) = download.target {
+                obj.insert("target".to_owned(), json!(target));
+            }
+            obj.insert("file".to_owned(), json!(download.file));
+            for (key, value) in &download.extra {
+                obj.insert(key.clone(), value.clone());
+            }
+            Value::Object(obj)
+        }
+        None => Value::Null,
+    };
     let mut source_map = Map::new();
     source_map.insert("id".to_owned(), json!(source_id));
     source_map.insert("asset".to_owned(), asset_json);
+    source_map.insert("download".to_owned(), download_json);
     if let Some(build) = build {
         source_map.insert("build".to_owned(), build.clone());
     }
@@ -876,6 +1060,65 @@ source:
     }
 
     #[test]
+    fn renders_download_entries_with_selected_asset_context() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:generic/acme/demo@1.0.0
+  asset:
+    target: linux_x64_gnu
+    file: demo-linux.tar.gz
+  download:
+    target: linux_x64_gnu
+    file: "https://example.test/{{source.asset.target}}/{{source.asset.file}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+
+        assert_eq!(
+            pkg.source
+                .download
+                .as_ref()
+                .map(|download| download.file.as_str()),
+            Some("https://example.test/linux_x64_gnu/demo-linux.tar.gz")
+        );
+    }
+    #[test]
+    fn renders_download_entries_with_matched_array_asset_target() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: demo
+source:
+  id: pkg:generic/acme/demo@1.0.0
+  asset:
+    target: [linux_x64_gnu, linux_x64]
+    file: demo-linux.tar.gz
+  download:
+    target: linux_x64_gnu
+    file: "https://example.test/{{source.asset.target}}/{{source.asset.file}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+
+        let asset = pkg.source.asset.as_ref().unwrap();
+        assert_eq!(asset.target.as_deref(), Some("linux_x64_gnu"));
+        assert_eq!(
+            pkg.source
+                .download
+                .as_ref()
+                .map(|download| download.file.as_str()),
+            Some("https://example.test/linux_x64_gnu/demo-linux.tar.gz")
+        );
+    }
+
+    #[test]
     fn propagates_unsupported_download_targets() {
         let raw: RawPackageSpec = serde_yaml::from_str(
             r#"
@@ -916,6 +1159,159 @@ source:
         assert_eq!(
             err.to_string(),
             "download entry missing 'file' or 'url' field"
+        );
+    }
+
+    #[test]
+    fn normalizes_download_file_maps_as_generic_asset_files() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: jdtls
+source:
+  id: pkg:generic/eclipse/eclipse.jdt.ls@v1.58.0
+  download:
+    - target: linux
+      files:
+        jdtls.tar.gz: https://example.test/jdtls/{{ version | strip_prefix "v" }}/jdtls.tar.gz
+        lombok.jar: https://example.test/lombok.jar
+      config: config_{{ version | strip_prefix "v" }}/
+share:
+  jdtls/config/: "{{source.download.config}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        let asset = pkg.source.asset.as_ref().unwrap();
+
+        assert_eq!(
+            asset.file.as_deref(),
+            Some("https://example.test/jdtls/1.58.0/jdtls.tar.gz")
+        );
+        assert_eq!(asset.extra_files, ["https://example.test/lombok.jar"]);
+        assert_eq!(asset.file_names, ["jdtls.tar.gz", "lombok.jar"]);
+        assert_eq!(
+            pkg.source
+                .download
+                .as_ref()
+                .and_then(|download| download.extra.get("config"))
+                .and_then(Value::as_str),
+            Some("config_1.58.0/")
+        );
+        assert_eq!(
+            pkg.share.get("jdtls/config/").map(String::as_str),
+            Some("config_1.58.0/")
+        );
+    }
+    #[test]
+    fn merges_download_file_map_into_metadata_only_asset() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: jdtls
+source:
+  id: pkg:generic/eclipse/eclipse.jdt.ls@v1.58.0
+  asset:
+    bin: jdtls/bin/jdtls
+    marker: kept
+  download:
+    - target: linux
+      files:
+        jdtls.tar.gz: https://example.test/jdtls/{{ version | strip_prefix "v" }}/jdtls.tar.gz
+        lombok.jar: https://example.test/lombok.jar
+      config: config_{{ version | strip_prefix "v" }}/
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+        let asset = pkg.source.asset.as_ref().unwrap();
+
+        assert_eq!(asset.target.as_deref(), Some("linux"));
+        assert_eq!(asset.bin.as_deref(), Some("jdtls/bin/jdtls"));
+        assert_eq!(
+            asset.extra.get("marker").and_then(Value::as_str),
+            Some("kept")
+        );
+        assert_eq!(
+            asset.extra.get("config").and_then(Value::as_str),
+            Some("config_1.58.0/")
+        );
+        assert_eq!(
+            asset.file.as_deref(),
+            Some("https://example.test/jdtls/1.58.0/jdtls.tar.gz")
+        );
+        assert_eq!(asset.extra_files, ["https://example.test/lombok.jar"]);
+        assert_eq!(asset.file_names, ["jdtls.tar.gz", "lombok.jar"]);
+    }
+
+    #[test]
+    fn normalizes_single_object_download_file_maps() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: jdtls
+source:
+  id: pkg:generic/eclipse/eclipse.jdt.ls@v1.58.0
+  download:
+    target: linux
+    files:
+      jdtls.tar.gz: "{{source.download.base}}/jdtls.tar.gz"
+      lombok.jar: "{{source.download.base}}/lombok.jar"
+    base: https://example.test/jdtls/{{ version | strip_prefix "v" }}
+    config: config_linux/
+share:
+  jdtls/config/: "{{source.download.config}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+
+        let asset = pkg.source.asset.as_ref().unwrap();
+        assert_eq!(
+            asset.file.as_deref(),
+            Some("https://example.test/jdtls/1.58.0/jdtls.tar.gz")
+        );
+        assert_eq!(asset.file_names, ["jdtls.tar.gz", "lombok.jar"]);
+        assert_eq!(
+            pkg.share.get("jdtls/config/").map(String::as_str),
+            Some("config_linux/")
+        );
+    }
+
+    #[test]
+    fn normalizes_wrapped_download_file_arrays() {
+        let raw: RawPackageSpec = serde_yaml::from_str(
+            r#"
+name: wrapped
+source:
+  id: pkg:generic/acme/wrapped@1.2.3
+  download:
+    files:
+      - target: linux_x64_gnu
+        file: https://example.test/wrapped/{{ version }}.tar.gz
+        config: config_{{ version }}/
+share:
+  wrapped/config/: "{{source.download.config}}"
+"#,
+        )
+        .unwrap();
+        let pkg = raw
+            .normalize(&Platform::new("linux", "x64", Some("gnu")), None)
+            .unwrap();
+
+        assert_eq!(
+            pkg.source
+                .download
+                .as_ref()
+                .map(|download| download.file.as_str()),
+            Some("https://example.test/wrapped/1.2.3.tar.gz")
+        );
+        assert_eq!(
+            pkg.share.get("wrapped/config/").map(String::as_str),
+            Some("config_1.2.3/")
         );
     }
 
