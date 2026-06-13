@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { masonCacheDir } from "./path-env";
 
-const OMP_LSP_CACHE_SCHEMA_VERSION = 2;
+const OMP_LSP_CACHE_SCHEMA_VERSION = 3;
 const OMP_LSP_CACHE_FILE = "omp-default-lsp.json";
 const OMP_DEFAULTS_RELATIVE_PATH = "src/lsp/defaults.json";
 const OMP_PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
@@ -52,6 +52,7 @@ const OMP_LSP_RULES: ReadonlyArray<{ signal: string; server: string; package: st
   { signal: "rust", server: "rust-analyzer", package: "rust-analyzer" },
   { signal: "go", server: "gopls", package: "gopls" },
   { signal: "python", server: "pyright", package: "pyright" },
+  { signal: "java", server: "jdtls", package: "jdtls" },
   { signal: "typescript", server: "typescript-language-server", package: "typescript-language-server" },
   { signal: "lua", server: "lua-language-server", package: "lua-language-server" },
   { signal: "shell", server: "bashls", package: "bash-language-server" },

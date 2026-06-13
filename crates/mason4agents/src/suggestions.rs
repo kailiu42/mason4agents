@@ -11,13 +11,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};
 
-const CURATED_SCHEMA_VERSION: u32 = 2;
+const CURATED_SCHEMA_VERSION: u32 = 3;
 const CURATED_SOURCE: &str = "lazyvim-extras-lang";
 const CURATED_CACHE_DIR: &str = "suggestions";
 const CURATED_CACHE_FILE: &str = "lazyvim-curated.json";
 const OMP_DEFAULT_LSP_CACHE_FILE: &str = "omp-default-lsp.json";
 const MAX_SCANNED_ENTRIES: usize = 4096;
-const MAX_SCAN_DEPTH: usize = 5;
+const MAX_SCAN_DEPTH: usize = 8;
 
 const LAZYVIM_SOURCES: &[LazyVimSource] = &[
     LazyVimSource {
@@ -380,7 +380,19 @@ fn is_mason_package_id(token: &str) -> bool {
 
 fn detect_project_signals(root: &Path) -> Result<ProjectSignals> {
     let mut signals = ProjectSignals::default();
+    for entry in fs::read_dir(root).map_err(|err| {
+        M4aError::Message(format!("project scan failed for {}: {err}", root.display()))
+    })? {
+        let entry = entry.map_err(|err| {
+            M4aError::Message(format!("project scan failed for {}: {err}", root.display()))
+        })?;
+        if entry.file_type().map(|ty| ty.is_file()).unwrap_or(false) {
+            classify_file(&entry.path(), &mut signals);
+        }
+    }
+
     let walker = WalkDir::new(root)
+        .min_depth(1)
         .max_depth(MAX_SCAN_DEPTH)
         .follow_links(false)
         .into_iter()
@@ -393,9 +405,15 @@ fn detect_project_signals(root: &Path) -> Result<ProjectSignals> {
         if !entry.file_type().is_file() {
             continue;
         }
-        classify_path(entry.path(), &mut signals);
+        classify_file(entry.path(), &mut signals);
     }
     Ok(signals)
+}
+
+fn classify_file(path: &Path, signals: &mut ProjectSignals) {
+    classify_path(path, signals);
+    classify_gradle_java_marker(path, signals);
+    classify_bazel_java_marker(path, signals);
 }
 
 fn classify_path(path: &Path, signals: &mut ProjectSignals) {
@@ -412,6 +430,7 @@ fn classify_path(path: &Path, signals: &mut ProjectSignals) {
         }
         "tsconfig.json" => signals.insert("typescript", "tsconfig.json detected"),
         "package.json" => signals.insert("typescript", "package.json detected"),
+        "pom.xml" => signals.insert("java", "pom.xml detected"),
         "biome.json" | "biome.jsonc" => {
             signals.insert(
                 "typescript",
@@ -459,11 +478,12 @@ fn classify_path(path: &Path, signals: &mut ProjectSignals) {
         Some(ext) if ext == "rs" => signals.insert("rust", "Rust source files detected"),
         Some(ext) if ext == "go" => signals.insert("go", "Go source files detected"),
         Some(ext) if ext == "py" => signals.insert("python", "Python source files detected"),
+        Some(ext) if ext == "java" => signals.insert("java", "Java source files detected"),
         Some(ext) if matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") => {
             signals.insert("typescript", "JavaScript/TypeScript source files detected")
         }
         Some(ext) if ext == "lua" => signals.insert("lua", "Lua source files detected"),
-        Some(ext) if matches!(ext.as_str(), "sh" | "bash" | "zsh") => {
+        Some(ext) if matches!(ext.as_str(), "sh" | "bash" | "zsh" | "fish") => {
             signals.insert("shell", "Shell scripts detected")
         }
         Some(ext) if matches!(ext.as_str(), "tf" | "tfvars") => {
@@ -472,11 +492,127 @@ fn classify_path(path: &Path, signals: &mut ProjectSignals) {
         Some(ext) if matches!(ext.as_str(), "yaml" | "yml") => {
             signals.insert("yaml", "YAML files detected")
         }
-        Some(ext) if matches!(ext.as_str(), "md" | "mdx") => {
+        Some(ext) if matches!(ext.as_str(), "md" | "mdx" | "markdown") => {
             signals.insert("markdown", "Markdown files detected")
         }
         _ => {}
+    };
+}
+
+fn classify_gradle_java_marker(path: &Path, signals: &mut ProjectSignals) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if !matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "build.gradle" | "build.gradle.kts"
+    ) {
+        return;
     }
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    let lower = strip_block_comments(&text).to_ascii_lowercase();
+    let has_java_marker = lower.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or_default();
+        let trimmed = code.trim().trim_end_matches(';').trim_matches('`').trim();
+        matches!(trimmed, "java" | "java-library")
+            || code.contains("plugins { java")
+            || code.contains("plugins { `java`")
+            || code.contains("plugins { `java-library`")
+            || code.contains("id(\"java\")")
+            || code.contains("id('java')")
+            || code.contains("id \"java\"")
+            || code.contains("id 'java'")
+            || code.contains("id(\"java-library\")")
+            || code.contains("id('java-library')")
+            || code.contains("id \"java-library\"")
+            || code.contains("id 'java-library'")
+            || code.contains("apply plugin: \"java\"")
+            || code.contains("apply plugin: 'java'")
+            || code.contains("apply plugin: \"java-library\"")
+            || code.contains("apply plugin: 'java-library'")
+            || code.contains("apply(plugin = \"java\")")
+            || code.contains("apply(plugin = 'java')")
+            || code.contains("apply(plugin = \"java-library\")")
+            || code.contains("apply(plugin = 'java-library')")
+            || code.contains("apply(plugin=\"java\")")
+            || code.contains("apply(plugin='java')")
+            || code.contains("apply(plugin=\"java-library\")")
+            || code.contains("apply(plugin='java-library')")
+            || code.contains("sourcecompatibility")
+            || code.contains("targetcompatibility")
+    });
+    if has_java_marker {
+        signals.insert("java", "Gradle Java project marker detected");
+    }
+}
+
+fn strip_block_comments(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_block_comment = false;
+    while let Some(ch) = chars.next() {
+        if in_block_comment {
+            if ch == '*' && matches!(chars.peek(), Some('/')) {
+                chars.next();
+                in_block_comment = false;
+            } else if ch == '\n' {
+                stripped.push('\n');
+            }
+        } else if ch == '/' && matches!(chars.peek(), Some('*')) {
+            chars.next();
+            in_block_comment = true;
+        } else {
+            stripped.push(ch);
+        }
+    }
+    stripped
+}
+
+fn classify_bazel_java_marker(path: &Path, signals: &mut ProjectSignals) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if !matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "module.bazel"
+            | "workspace"
+            | "workspace.bazel"
+            | "workspace.bzlmod"
+            | "build"
+            | "build.bazel"
+    ) {
+        return;
+    }
+
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    if text
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .any(|line| {
+            contains_bazel_token(line, "rules_java")
+                || contains_bazel_token(line, "java_library")
+                || contains_bazel_token(line, "java_binary")
+                || contains_bazel_token(line, "java_test")
+        })
+    {
+        signals.insert("java", "Bazel Java project marker detected");
+    }
+}
+
+fn contains_bazel_token(line: &str, token: &str) -> bool {
+    line.match_indices(token).any(|(start, _)| {
+        let before = line[..start].chars().next_back();
+        let after = line[start + token.len()..].chars().next();
+        !is_bazel_identifier_char(before) && !is_bazel_identifier_char(after)
+    })
+}
+
+fn is_bazel_identifier_char(ch: Option<char>) -> bool {
+    ch.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 impl ProjectSignals {
@@ -551,6 +687,7 @@ fn builtin_curated() -> LazyVimCuratedCache {
                 "LazyVim extras/lang/python.lua",
                 &[pkg("pyright", "LSP"), pkg("ruff", "Linter/Formatter")],
             ),
+            rule("java", "OMP Java LSP defaults", &[pkg("jdtls", "LSP")]),
             rule(
                 "typescript",
                 "LazyVim extras/lang/typescript",
@@ -626,6 +763,7 @@ fn rule_order(signal: &str) -> usize {
         "rust" => 10,
         "go" => 20,
         "python" => 30,
+        "java" => 35,
         "typescript" => 40,
         "lua" => 50,
         "shell" => 60,
@@ -642,6 +780,7 @@ fn capability_for_package(package: &str) -> &'static str {
         "rust-analyzer"
         | "gopls"
         | "pyright"
+        | "jdtls"
         | "vtsls"
         | "typescript-language-server"
         | "lua-language-server"
@@ -781,6 +920,426 @@ mod tests {
                 "typescript-language-server"
             ]
         );
+    }
+
+    #[test]
+    fn detects_java_projects_from_build_files_and_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let source_dir = root.join("src/main/java/com/acme");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(root.join("build.gradle.kts"), "plugins { java }\n").unwrap();
+        fs::write(
+            source_dir.join("App.java"),
+            "package com.acme;\nclass App {}\n",
+        )
+        .unwrap();
+
+        let cache = registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]);
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &cache,
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+        assert_eq!(items[0].signals, ["java"]);
+    }
+
+    #[test]
+    fn detects_source_only_java_projects_in_standard_package_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let source_dir = root.join("src/main/java/com/acme/server");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("App.java"),
+            "package com.acme.server;\nclass App {}\n",
+        )
+        .unwrap();
+
+        let cache = registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]);
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &cache,
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+        assert_eq!(
+            items[0].reason,
+            "Java source files detected; LSP via OMP Java LSP defaults"
+        );
+    }
+
+    #[test]
+    fn ignores_bazel_java_markers_in_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("WORKSPACE.bazel"),
+            "# rules_java\n# java_library(name = \"lib\")\n# java_binary(name = \"bin\")\n# java_test(name = \"test\")\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+    #[test]
+    fn ignores_bazel_java_markers_inside_longer_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("MODULE.bazel"),
+            "bazel_dep(name = \"rules_javascript\", version = \"1.0.0\")\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn detects_bazel_java_projects_from_module_and_build_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(root.join("java")).unwrap();
+        fs::write(
+            root.join("MODULE.bazel"),
+            "module(name = \"demo\")\nbazel_dep(name = \"rules_java\", version = \"8.16.1\")\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("java/BUILD"),
+            "load(\"@rules_java//java:defs.bzl\", \"java_library\")\njava_library(name = \"lib\")\n",
+        )
+        .unwrap();
+
+        let cache = registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]);
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &cache,
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+        assert_eq!(
+            items[0].reason,
+            "Bazel Java project marker detected; LSP via OMP Java LSP defaults"
+        );
+    }
+
+    #[test]
+    fn ignores_root_level_ignored_directories_when_scanning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        let ignored = root.join("node_modules/acme");
+        fs::create_dir_all(&ignored).unwrap();
+        fs::write(ignored.join("package.json"), "{}\n").unwrap();
+        fs::write(ignored.join("index.ts"), "export const demo = 1;\n").unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package(
+                "typescript-language-server",
+                &["TypeScript", "JavaScript"],
+                &["LSP"],
+                "1.0.0",
+            )]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn does_not_treat_non_java_gradle_projects_as_java() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "plugins {\n    kotlin(\"jvm\") version \"2.0.0\"\n}\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn detects_multiline_gradle_kotlin_java_library_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "plugins {\n    `java-library`\n}\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+    }
+    #[test]
+    fn detects_multiline_gradle_java_plugin_with_comment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "plugins {\n    java // app\n}\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+    }
+
+    #[test]
+    fn ignores_block_commented_gradle_java_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "/*\nplugins { java }\nid(\"java-library\")\n*/\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+    #[test]
+    fn ignores_commented_gradle_java_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "// id(\"java\")\n// apply(plugin = \"java-library\")\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn detects_gradle_kotlin_apply_java_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("build.gradle.kts"), "apply(plugin = \"java\")\n").unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+    }
+
+    #[test]
+    fn detects_gradle_kotlin_apply_java_library_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "apply(plugin = \"java-library\")\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+    }
+    #[test]
+    fn detects_one_line_gradle_kotlin_backtick_java_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("build.gradle.kts"),
+            "plugins { `java-library` }\n",
+        )
+        .unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+    }
+
+    #[test]
+    fn detects_tfvars_and_mdx_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("terraform.tfvars"), "region = \"us-east-1\"\n").unwrap();
+        fs::write(root.join("guide.mdx"), "# Guide\n").unwrap();
+
+        let items = suggest_packages(
+            &paths(tmp.path()),
+            &registry(&[
+                package("terraform-ls", &["Terraform"], &["LSP"], "1.0.0"),
+                package("marksman", &["Markdown"], &["LSP"], "1.0.0"),
+            ]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["terraform-ls", "marksman"]);
     }
 
     #[test]
@@ -942,6 +1501,41 @@ mod tests {
 
         assert_eq!(names(&items), ["cached-rust"]);
         assert_eq!(items[0].source, "fixture-cache");
+    }
+
+    #[test]
+    fn stale_curated_cache_schema_falls_back_to_builtin_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let cache_path = curated_cache_path(&paths);
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let stale = LazyVimCuratedCache {
+            schema_version: CURATED_SCHEMA_VERSION - 1,
+            source: "fixture-cache".to_owned(),
+            source_ref: Some("cache".to_owned()),
+            fetched_at: Utc::now(),
+            rules: vec![rule("rust", "stale fixture", &[pkg("cached-rust", "LSP")])],
+        };
+        fs::write(&cache_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let root = tmp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("build.gradle.kts"), "plugins { java }\n").unwrap();
+        let items = suggest_packages(
+            &paths,
+            &registry(&[package("jdtls", &["Java"], &["LSP"], "1.0.0")]),
+            &InstalledState::default(),
+            &Platform::current(),
+            SuggestionOptions {
+                project_path: &root,
+                refresh_curated: false,
+                curated_source: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(names(&items), ["jdtls"]);
+        assert!(items[0].source.ends_with(":builtin"));
     }
 
     #[test]
