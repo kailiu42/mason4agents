@@ -57,9 +57,8 @@ export async function openMasonPanel(ctx: unknown, bridge: CliBridge, options: M
                releaseReservedLongOperation();
                return;
             }
-            const running = runInitialPanelCommand(panel, options.initialCommand);
-            releaseReservedLongOperation();
-            void running.then(requestRender, requestRender);
+            const running = Promise.resolve().then(() => runInitialPanelCommand(panel, options.initialCommand));
+            void running.finally(releaseReservedLongOperation).then(requestRender, requestRender);
          }, 0);
       };
       await anyCtx.ui.custom((tui: unknown, theme: unknown, _keybindings: unknown, done: (result?: unknown) => void) => {

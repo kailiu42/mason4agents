@@ -636,7 +636,7 @@ describe("Pi extension", () => {
     expect(component?.render(80).join("\n")).toContain("Loading...");
 
     await waitForInitialPanelLoad();
-    expect(calls).toEqual([["install", "stylua"]]);
+    expect(calls).toEqual([["search", "stylua"], ["install", "stylua"]]);
     const progressLines = (component?.render(120) as string[]).map(stripAnsi);
     expect(progressLines.join("\n")).toContain("operation progress");
     const progressTitleLine = progressLines.find((line) => line.includes("operation progress"));
@@ -644,7 +644,7 @@ describe("Pi extension", () => {
 
     resolveInstall([{ package: "stylua", version: "v2.0.0", source_id: "pkg:generic/acme/stylua@v2.0.0", bins: {}, package_dir: "/tmp/stylua" }]);
     await waitForInitialPanelLoad();
-    expect(calls).toEqual([["install", "stylua"], ["list"]]);
+    expect(calls).toEqual([["search", "stylua"], ["install", "stylua"], ["list"]]);
     expect(component?.render(80).join("\n")).toContain("operation result");
     expect(component?.render(80).join("\n")).toContain("stylua");
   });
